@@ -1,0 +1,27 @@
+# Data Configuration:
+setup: 'squad_split_v2'
+
+cached_train_path: 'data/squad_split_v2/train.pt'
+cached_dev_path: 'data/squad_split_v2/dev.pt'
+cached_test_path: 'data/squad_split_v2/test.pt'
+cached_vocabularies_path: 'data/squad_split_v2/vocab.pt'
+
+vocab_size: 100000
+
+min_word_frequency: 1
+
+max_source_length: 200
+max_target_length: 50
+
+
+# Model Configuration.
+
+
+# Training Configuration.
+cached_model_dir: checkpoints
+batch_size: 64
+learning_rate: 0.001
+
+
+# Inference Configuration.
+output: generated_question.txt
