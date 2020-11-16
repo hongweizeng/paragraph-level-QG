@@ -5,13 +5,14 @@ from easydict import EasyDict
 import json
 
 DEFAULT_BEST_CHECKPOINT_NAME = 'best.ckpt'
+DEFAULT_LATEST_CHECKPOINT_NAME = 'latest.ckpt'
 DEFAULT_TRAIN_CACHED_DATASET_SUFFIX = '.train.pt'
 DEFAULT_VALID_CACHED_DATASET_SUFFIX = '.valid.pt'
 DEFAULT_VOCAB_CACHED_DATASET_SUFFIX = '.vocab.pt'
 DEFAULT_CONFIG_NAME = 'config.json'
 
 
-def parse_configs(args):
+def preprocess_args(args):
     yaml_file = args.config
     with open(yaml_file, 'r') as stream:
         config_dict = yaml.safe_load(stream)
@@ -26,6 +27,7 @@ def parse_configs(args):
         os.makedirs(config.save_path)
 
     config.cached_best_model = os.path.join(config.save_path, DEFAULT_BEST_CHECKPOINT_NAME)
+    config.cached_latest_model = os.path.join(config.save_path, DEFAULT_LATEST_CHECKPOINT_NAME)
 
     # Logging.
     config.log_file = os.path.join(config.save_path, 'train.log')

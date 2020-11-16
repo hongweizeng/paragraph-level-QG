@@ -4,11 +4,8 @@ import torch.nn.functional as F
 from tqdm import tqdm
 from easydict import EasyDict
 
-# import maxout_pointer_gated_self_attention.config as config
-# from maxout_pointer_gated_self_attention.data_utils import outputids2words, UNK_TOKEN, PAD_TOKEN, SOS_TOKEN, EOS_TOKEN
-from data import UNK_TOKEN, PAD_TOKEN, SOS_TOKEN, EOS_TOKEN
-
 from utils import logger, count_params, Statistics
+from datasets.common import UNK_TOKEN, PAD_TOKEN, SOS_TOKEN, EOS_TOKEN
 
 
 def outputids2words(id_list, idx2word, article_oovs=None, UNK_ID=0):
@@ -61,11 +58,11 @@ class Hypothesis(object):
 
 
 class Searcher(object):
-    def __init__(self, vocabularies, data_loader, model, output_dir, device, config:EasyDict):
-        self.config = config
-        self.beam_size = config['beam_size']
-        self.min_decode_step = config['min_decode_step']
-        self.max_decode_step = config['max_decode_step']
+    def __init__(self, vocabularies, data_loader, model, output_dir,
+                 beam_size=1, min_decode_step=1, max_decode_step=100):
+        self.beam_size = beam_size
+        self.min_decode_step = min_decode_step
+        self.max_decode_step = max_decode_step
 
         self.output_dir = output_dir
 
@@ -83,7 +80,7 @@ class Searcher(object):
         self.test_data = data_loader.dataset
 
         self.model = model
-        self.device = device
+        self.device = next(model.parameters()).device
 
         self.pred_dir = os.path.join(output_dir, "generated.txt")
         self.golden_dir = os.path.join(output_dir, "golden.txt")
@@ -98,7 +95,7 @@ class Searcher(object):
 
 
     def search(self):
-        logger.info(' * Dataset size: valid = %d' % len(self.data_loader))
+        logger.info(' * Dataset size: test = %d' % len(self.data_loader))
         logger.info(' * Output directory: %s' % self.output_dir)
 
         references = []
@@ -112,14 +109,14 @@ class Searcher(object):
             # discard START  token
             output_indices = [int(idx) for idx in best_question.tokens[1:-1]]
             decoded_words = outputids2words(
-                output_indices, self.idx2tok, batch_data.oov_lst[0], UNK_ID=self.TRG_UNK_INDEX)
+                output_indices, self.idx2tok, batch_data.paragraph_oov_lst[0], UNK_ID=self.TRG_UNK_INDEX)
             try:
                 fst_stop_idx = decoded_words.index(self.TRG_EOS_INDEX)
                 decoded_words = decoded_words[:fst_stop_idx]
             except ValueError:
                 decoded_words = decoded_words
 
-            golden_question = self.test_data[i].meta_data['trg']
+            golden_question = self.test_data[i].meta_data['question']['tokens']
             references.append([golden_question])
             hypothesis.append(decoded_words)
 
@@ -153,32 +150,35 @@ class BeamSearcher(Searcher):
 
 
     def search_batch(self, batch_data):
-        src_seq, ext_src_seq, tag_seq = batch_data.src_seq, batch_data.ext_src_seq, batch_data.tag_seq
+        # src_seq, ext_src_seq, tag_seq = batch_data.src_seq, batch_data.ext_src_seq, batch_data.tag_seq
         src_padding_idx = self.PAD_INDEX
 
-        enc_mask = (src_seq != src_padding_idx)
+        # enc_mask = (batch_data.paragraph_ids != src_padding_idx)
+        attention_mask = (batch_data.paragraph_ids != batch_data.pad_token_id)
+        embedding_output_for_encoder = self.model.embeddings(input_ids=batch_data.paragraph_ids, feature_tag_ids_dict=None,
+                                                       answer_tag_ids=batch_data.paragraph_ans_tag_ids)
+        enc_outputs, enc_states = self.model.encoder(embedding_output_for_encoder, attention_mask)
+        # enc_outputs, enc_states = self.model.encoder(batch_data.paragraph_ids, batch_data.paragraph_ans_tag_ids, enc_mask)
 
-        enc_outputs, enc_states = self.model.encoder(batch_data)
-
-        prev_context = torch.zeros(1, 1, enc_outputs.size(-1)).to(dtype=next(self.parameters()).dtype)  # fp16 compatibility.cuda(device=self.device)
+        prev_context = torch.zeros(1, 1, enc_outputs.size(-1)).cuda(device=self.device)
 
         h, c = enc_states  # [2, b, d] but b = 1
-        hypotheses = [Hypothesis(tokens=[self.tok2idx[SOS_TOKEN]],
+        hypotheses = [Hypothesis(tokens=[self.TRG_SOS_INDEX],
                                  log_probs=[0.0],
                                  state=(h[:, 0, :], c[:, 0, :]),
                                  context=prev_context[0]) for _ in range(self.beam_size)]
         # tile enc_outputs, enc_mask for beam search
-        ext_src_seq = ext_src_seq.repeat(self.beam_size, 1)
+        ext_src_seq = batch_data.paragraph_extended_ids.repeat(self.beam_size, 1)
         enc_outputs = enc_outputs.repeat(self.beam_size, 1, 1)
         enc_features = self.model.decoder.get_encoder_features(enc_outputs)
-        enc_mask = enc_mask.repeat(self.beam_size, 1)
+        enc_mask = attention_mask.repeat(self.beam_size, 1)
         num_steps = 0
         results = []
-        while num_steps < self.config.max_decode_step and len(results) < self.beam_size:
+        while num_steps < self.max_decode_step and len(results) < self.beam_size:
             latest_tokens = [h.latest_token for h in hypotheses]
             latest_tokens = [idx if idx < len(
                 self.tok2idx) else self.TRG_UNK_INDEX for idx in latest_tokens]
-            prev_y = torch.tensor(latest_tokens, dtype=torch.long).view(-1).to(dtype=next(self.parameters()).dtype)  # fp16 compatibility, device=self.device)
+            prev_y = torch.tensor(latest_tokens, dtype=torch.long, device=self.device).view(-1)
 
             # if config.use_gpu:
             #     prev_y = prev_y.to(self.device)
@@ -198,7 +198,9 @@ class BeamSearcher(Searcher):
             prev_context = torch.stack(all_context, dim=0)
             prev_states = (prev_h, prev_c)
             # [beam_size, |V|]
-            logits, states, context_vector = self.model.decoder.decode(prev_y, ext_src_seq,
+
+            embedded_prev_y = self.model.embeddings(prev_y)
+            logits, states, context_vector = self.model.decoder.decode(embedded_prev_y, ext_src_seq,
                                                                        prev_states, prev_context,
                                                                        enc_features, enc_mask)
             h_state, c_state = states
@@ -222,7 +224,7 @@ class BeamSearcher(Searcher):
             hypotheses = []
             for h in self.sort_hypotheses(all_hypotheses):
                 if h.latest_token == self.TRG_EOS_INDEX:
-                    if num_steps >= self.config.min_decode_step:
+                    if num_steps >= self.min_decode_step:
                         results.append(h)
                 else:
                     hypotheses.append(h)

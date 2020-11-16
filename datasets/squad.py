@@ -8,8 +8,7 @@ stanza_nlp = stanza.Pipeline('en', logging_level='WARN', processors='tokenize,mw
 
 
 from utils.logging import logger
-from datasets.common import setup_vocab, QgDataset, Example, UNK_TOKEN, PAD_TOKEN, SOS_TOKEN, EOS_TOKEN, \
-    get_answer_tag, context2ids, question2ids, parse_text_with_stanza
+from datasets.common import Example, get_answer_tag, parse_text_with_stanza
 
 
 def read_squad_qas_dict(file_path, save_path, recover=True):
@@ -64,6 +63,7 @@ def read_squad_qas_dict(file_path, save_path, recover=True):
 
                     qas_id = qa['id']
                     qas_dict[qas_id] = meta_data
+            t.update()
     t.close()
 
     logger.info('Save file %s into meta_data %s' % (file_path, save_path))
@@ -79,21 +79,16 @@ def read_squad_examples(directory, corpus_type, qas_id_dict):
 
     unique_id = 0
     examples = []
-    key_error_count = 0
     with tqdm(total=len(qas_ids), desc='Reading %s examples' % corpus_type) as t:
         for qas_id in qas_ids:
             qas_id = qas_id.strip()
 
-            if qas_id in qas_id_dict:
-                meta_data = qas_id_dict[qas_id]
+            meta_data = qas_id_dict[qas_id]
 
-                examples.append(Example(unique_id=unique_id, meta_data=meta_data))
-                unique_id += 1
-            else:
-                key_error_count += 1
+            examples.append(Example(unique_id=unique_id, meta_data=meta_data))
+            unique_id += 1
+
             t.update()
 
     t.close()
-    logger.info('%s: Final_dataset_size  = original_dataset_size - key_error_size : %d = %d - %d' %
-                (corpus_type, len(examples), len(qas_ids), key_error_count))
     return examples

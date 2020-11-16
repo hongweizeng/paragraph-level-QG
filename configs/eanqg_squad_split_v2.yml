@@ -1,4 +1,4 @@
-setup: 'squad_split_v2'
+setup: 'eanqg_squad_split_v2'
 
 #########################################################################################################
 # ---------------------------------------- DATA CONFIGURATIONS ---------------------------------------- #
@@ -21,12 +21,20 @@ max_target_length: 50
 # ---------------------------------------- MODEL CONFIGURATIONS ---------------------------------------- #
 ##########################################################################################################
 
-embedding_size: 300
-hidden_size: 300
-num_layers: 2
-dropout: 0.3
+model:
+    embedding_size: 300
 
-use_pointer: True
+    feature_num: 0
+    feature_tag_embedding_size: 3
+    answer_tag_embedding_size: 16
+
+    hidden_size: 512
+    num_layers: 2
+    dropout: 0.3
+    layer_norm_eps: 0.000000000001
+    hidden_dropout_prob: 0.1
+
+    use_pointer: False
 
 # Initialization
 param_init: 0.1
@@ -47,7 +55,7 @@ batch_size: 64
 
 optimizer_name: adam
 sgd_learning_rate: 0.1
-adam_learning_rate: 0.001
+adam_learning_rate: 0.0003
 
 max_grad_norm: 5.
 
@@ -58,7 +66,7 @@ max_to_keep: 20
 # ------------------------------------- INFERENCE CONFIGURATIONS ------------------------------------- #
 #########################################################################################################
 
-beam_size: 10
+beam_size: 15
 min_decode_step: 8
 max_decode_step: 30
 

@@ -2,7 +2,7 @@
 paragraph level question generation
 
 ## Dataset
-Get the data under the ```datasets``` directory.
+Get the data under the ```data``` directory.
 
 ### 1. SQuAD Split-1: [Article-level Split]
 **[Learning to Ask: Neural Question Generation for Reading Comprehension](https://www.aclweb.org/anthology/P17-1123.pdf)**. *ACL 2017*. [[Github]](https://github.com/xinyadu/nqg/tree/master/data)
@@ -22,12 +22,12 @@ cp nqg/data/raw/* squad_split_v1/
 cd squad_split_v1
 python convert_squad_split1_qas_id.py
 cd ..
-python preprocess.py --data_dir data/squad_split_v1
+python preprocess.py -data_dir data -dataset squad_split_v1
 ```
 
 
 ### 2. SQuAD Split-2: [Sentence-level Split]
-**[Neural Question Generation from Text: A Preliminary Study](https://arxiv.org/pdf/1704.01792.pdf)**. *NLPCC 2017*. [[Data]](https://res.qyzhou.me/)
+**[Neural Question Generation from Text: A Preliminary Study](https://arxiv.org/pdf/1704.01792.pdf)**. *NLPCC 2017*. [[Github]](https://github.com/magic282/NQG) [[Data]](https://res.qyzhou.me/)
 
 Randomly halve the development set to construct the new development and test sets.
 
@@ -43,7 +43,7 @@ cp qas_id_in_squad/train.txt.id squad_split_v2/
 cp qas_id_in_squad/dev.txt.shuffle.dev.id squad_split_v2/dev.txt.id
 cp qas_id_in_squad/dev.txt.shuffle.test.id squad_split_v2/test.txt.id
 cd ..
-python preprocess.py --data_dir data/squad_split_v2
+python preprocess.py -data_dir data -dataset squad_split_v2
 ```
 
 
@@ -61,5 +61,10 @@ python maluuba/newsqa/data_generator.py
 Then, we will have `train.tsv`, `dev.tsv` and `test.tsv` in `datasets/newsqa/split_data` folder.
 ```shell script
 cd ..
-python preprocess.py --data_dir data/newsqa
+python preprocess.py -data_dir data -dataset newsqa 
 ```
+
+
+## References
+
+[1]. 

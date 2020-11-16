@@ -9,27 +9,61 @@ from utils import logger, freeze_module
 
 INF = 1e12
 
+class Embeddings(nn.Module):
+    """Construct the embeddings from word, pos_tag, ner_tag, dep_tag, cas_tag and answer_tag embeddings.
+    """
+
+    def __init__(self, config):
+        super().__init__()
+        self.word_embeddings = nn.Embedding(config.vocab_size, config.embedding_size, padding_idx=config.pad_token_id)
+        self.feature_tag_embeddings = nn.Embedding(config.feature_tag_vocab_size, config.feature_tag_embedding_size)
+        self.answer_tag_embeddings = nn.Embedding(config.answer_tag_vocab_size, config.answer_tag_embedding_size)
+
+        # self.LayerNorm is not snake-cased to stick with TensorFlow model variable name and be able to load
+        # any TensorFlow checkpoint file
+
+        # concatenated_embedding_size = config.embedding_size + config.feature_tag_embedding_size * config.feature_num\
+        #                             + config.answer_tag_embedding_size
+
+        self.LayerNorm = nn.LayerNorm(config.embedding_size, eps=config.layer_norm_eps)
+        self.dropout = nn.Dropout(config.hidden_dropout_prob)
+
+    def forward(self, input_ids=None, feature_tag_ids_dict=None, answer_tag_ids=None):
+        embeddings = self.word_embeddings(input_ids)
+        embeddings = self.LayerNorm(embeddings)
+
+        if feature_tag_ids_dict is not None:
+
+            for k, v in feature_tag_ids_dict:
+                feature_tag_embeddings = self.feature_tag_embeddings(v)
+
+                embeddings = torch.cat([embeddings, feature_tag_embeddings], dim=2)
+
+        if answer_tag_ids is not None:
+            answer_tag_embeddings = self.answer_tag_embeddings(answer_tag_ids)
+
+            embeddings = torch.cat([embeddings, answer_tag_embeddings], dim=2)
+
+        # embeddings = inputs_embeds + feature_tag_embeddings + answer_tag_embeddings
+        embeddings = self.dropout(embeddings)
+        return embeddings
+
 
 class Encoder(nn.Module):
-    def __init__(self, embeddings, tag_vocab_size, embedding_size, hidden_size, num_layers, dropout):
-        super(Encoder, self).__init__()
+    def __init__(self, config):
+        super().__init__()
+        lstm_input_size = config.embedding_size + config.feature_tag_embedding_size * config.feature_num + \
+                          config.answer_tag_embedding_size
 
-        # self.embedding = nn.Embedding(vocab_size, embedding_size)
-        self.tag_embedding = nn.Embedding(tag_vocab_size, 3)
-        lstm_input_size = embedding_size + 3
-
-        self.embedding = embeddings
-
-        self.num_layers = num_layers
+        self.num_layers = config.num_layers
         if self.num_layers == 1:
             dropout = 0.0
-        self.lstm = nn.LSTM(lstm_input_size, hidden_size, dropout=dropout,
-                            num_layers=num_layers, bidirectional=True, batch_first=True)
-        self.linear_trans = nn.Linear(2 * hidden_size, 2 * hidden_size)
+        self.lstm = nn.LSTM(lstm_input_size, config.hidden_size, dropout=config.dropout,
+                            num_layers=config.num_layers, bidirectional=True, batch_first=True)
+        self.linear_trans = nn.Linear(2 * config.hidden_size, 2 * config.hidden_size)
         self.update_layer = nn.Linear(
-            4 * hidden_size, 2 * hidden_size, bias=False)
-        self.gate = nn.Linear(4 * hidden_size, 2 * hidden_size, bias=False)
-
+            4 * config.hidden_size, 2 * config.hidden_size, bias=False)
+        self.gate = nn.Linear(4 * config.hidden_size, 2 * config.hidden_size, bias=False)
     def gated_self_attn(self, queries, memories, mask):
         # queries: [b,t,d]
         # memories: [b,t,d]
@@ -47,13 +81,15 @@ class Encoder(nn.Module):
 
         return updated_output
 
-    def forward(self, src_seq, tag_seq, enc_mask):
-        total_length = src_seq.size(1)
+    def forward(self, embedded, enc_mask):
+        # total_length = src_seq.size(1)
+        total_length = embedded.size(1)
         src_len = enc_mask.sum(1).tolist()
 
-        embedded = self.embedding(src_seq)
-        tag_embedded = self.tag_embedding(tag_seq)
-        embedded = torch.cat((embedded, tag_embedded), dim=2)
+        # embedded = self.embedding(src_seq)
+        # tag_embedded = self.tag_embedding(tag_seq)
+        # embedded = torch.cat((embedded, tag_embedded), dim=2)
+        embedded = embedded
         packed = pack_padded_sequence(embedded,
                                       src_len,
                                       batch_first=True,
@@ -82,27 +118,23 @@ class Encoder(nn.Module):
 
 
 class Decoder(nn.Module):
-    def __init__(self, embeddings, vocab_size,
-                 embedding_size, hidden_size, num_layers, dropout,
-                 use_pointer, UNK_ID):
-        super(Decoder, self).__init__()
-        self.vocab_size = vocab_size
-        # self.embedding = nn.Embedding(vocab_size, embedding_size)
+    def __init__(self, config):
+        super().__init__()
+        self.vocab_size = config.vocab_size
 
-        self.embedding = embeddings
-
-        if num_layers == 1:
+        hidden_size = 2 * config.hidden_size
+        if config.num_layers == 1:
             dropout = 0.0
         self.encoder_trans = nn.Linear(hidden_size, hidden_size)
         self.reduce_layer = nn.Linear(
-            embedding_size + hidden_size, embedding_size)
-        self.lstm = nn.LSTM(embedding_size, hidden_size, batch_first=True,
-                            num_layers=num_layers, bidirectional=False, dropout=dropout)
+            config.embedding_size + hidden_size, config.embedding_size)
+        self.lstm = nn.LSTM(config.embedding_size, hidden_size, batch_first=True,
+                            num_layers=config.num_layers, bidirectional=False, dropout=config.dropout)
         self.concat_layer = nn.Linear(2 * hidden_size, hidden_size)
-        self.logit_layer = nn.Linear(hidden_size, vocab_size)
+        self.logit_layer = nn.Linear(hidden_size, config.vocab_size)
 
-        self.use_pointer = use_pointer
-        self.UNK_ID = UNK_ID
+        self.use_pointer = config.use_pointer
+        self.UNK_ID = config.unk_token_id
 
     @staticmethod
     def attention(query, memories, mask):
@@ -117,13 +149,15 @@ class Decoder(nn.Module):
     def get_encoder_features(self, encoder_outputs):
         return self.encoder_trans(encoder_outputs)
 
-    def forward(self, trg_seq, ext_src_seq, init_states, encoder_outputs, encoder_mask):
+    def forward(self, trg_seq_embedded, ext_src_seq, init_states, encoder_outputs, encoder_mask):
         # trg_seq : [b,t]
         # init_states : [2,b,d]
         # encoder_outputs : [b,t,d]
         # init_states : a tuple of [2, b, d]
-        device = trg_seq.device
-        batch_size, max_len = trg_seq.size()
+        # device = trg_seq.device
+        # batch_size, max_len = trg_seq.size()
+        device = trg_seq_embedded.device
+        batch_size, max_len, _ = trg_seq_embedded.size()
 
         hidden_size = encoder_outputs.size(-1)
         memories = self.get_encoder_features(encoder_outputs)
@@ -133,8 +167,9 @@ class Decoder(nn.Module):
         prev_context = torch.zeros((batch_size, 1, hidden_size))
         prev_context = prev_context.to(device)
         for i in range(max_len):
-            y_i = trg_seq[:, i].unsqueeze(1)  # [b, 1]
-            embedded = self.embedding(y_i)  # [b, 1, d]
+            # y_i = trg_seq[:, i].unsqueeze(1)  # [b, 1]
+            # embedded = self.embedding(y_i)  # [b, 1, d]
+            embedded = trg_seq_embedded[:, i, :].unsqueeze(1)  # [b, 1, d]
             lstm_inputs = self.reduce_layer(
                 torch.cat([embedded, prev_context], 2))
             output, states = self.lstm(lstm_inputs, prev_states)
@@ -165,10 +200,11 @@ class Decoder(nn.Module):
 
         return logits
 
-    def decode(self, y, ext_x, prev_states, prev_context, encoder_features, encoder_mask):
+    def decode(self, embedded_y, ext_x, prev_states, prev_context, encoder_features, encoder_mask):
         # forward one step lstm
         # y : [b]
-        embedded = self.embedding(y.unsqueeze(1))
+        # embedded = self.embedding(y.unsqueeze(1))
+        embedded = embedded_y.unsqueeze(1)
         lstm_inputs = self.reduce_layer(torch.cat([embedded, prev_context], 2))
         output, states = self.lstm(lstm_inputs, prev_states)
 
@@ -180,7 +216,8 @@ class Decoder(nn.Module):
         logit = self.logit_layer(logit_input)  # [b, |V|]
 
         if self.use_pointer:
-            batch_size = y.size(0)
+            # batch_size = y.size(0)
+            batch_size = embedded_y.size(0)
             num_oov = max(torch.max(ext_x - self.vocab_size + 1), 0)
             # zeros = torch.zeros((batch_size, num_oov)).type(dtype=logit.dtype)
             zeros = logit.data.new_zeros(size=(batch_size, num_oov))
@@ -196,41 +233,41 @@ class Decoder(nn.Module):
         return logit, states, context
 
 
-class Seq2seq(nn.Module):
-    def __init__(self, config, embedding=None, UNK_ID=0, token_vocab_size=100000, tag_vocab_size=10):
-        super(Seq2seq, self).__init__()
-        self.encoder = Encoder(embedding,
-                               tag_vocab_size,
-                               config.embedding_size,
-                               config.hidden_size,
-                               config.num_layers,
-                               config.dropout)
-        self.decoder = Decoder(embedding, token_vocab_size,
-                               config.embedding_size,
-                               2 * config.hidden_size,
-                               config.num_layers,
-                               config.dropout,
-                               config.use_pointer,
-                               UNK_ID)
+class Model(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
 
-    def forward(self, batch_data, src_padding_idx=1):
-        enc_mask = (batch_data.paragraph_ids != src_padding_idx)
+        self.embeddings = Embeddings(config)
+        self.encoder = Encoder(config)
+        self.decoder = Decoder(config)
 
-        enc_outputs, enc_states = self.encoder(batch_data.paragraph_ids, batch_data.paragraph_ans_tag_ids, enc_mask)
+    def forward(self, batch_data):
+        """
+        Arguments:
+            attention_mask: torch.Tensor with 1 indicating tokens to ATTEND to
+        """
+
+        attention_mask = (batch_data.paragraph_ids != batch_data.pad_token_id)
+
+        assert batch_data.paragraph_ids.lt(45004).all(), 'source vocab out'
+        assert batch_data.paragraph_ans_tag_ids.lt(5).all(), 'answer vocab out'
+
+        embedding_output_for_encoder = self.embeddings(input_ids=batch_data.paragraph_ids, feature_tag_ids_dict=None,
+                                                       answer_tag_ids=batch_data.paragraph_ans_tag_ids)
+        enc_outputs, enc_states = self.encoder(embedding_output_for_encoder, attention_mask)
         sos_trg = batch_data.question_ids[:, :-1].contiguous()
 
-        logits = self.decoder(sos_trg, batch_data.paragraph_extended_ids,
-                              enc_states, enc_outputs, enc_mask)
+        assert batch_data.question_ids.lt(45004).all(), 'target vocab out'
+        embedding_output_for_decoder = self.embeddings(input_ids=sos_trg)
+        logits = self.decoder(embedding_output_for_decoder, batch_data.paragraph_extended_ids,
+                              enc_states, enc_outputs, attention_mask)
         return logits
 
 
-def setup_model(vocabularies, pad_index, UNK_ID, config, device=None, checkpoint=None):
-    token_vocab_size = len(vocabularies['token'])
-    tag_vocab_size = len(vocabularies['answer'])
-
-    embedding = nn.Embedding(token_vocab_size, embedding_dim=300, padding_idx=pad_index)
-
-    model = Seq2seq(config, embedding, UNK_ID, token_vocab_size=token_vocab_size, tag_vocab_size=tag_vocab_size)
+def setup_model(config, vocabularies, device=None, checkpoint=None):
+    # Set up model configuration.
+    model = Model(config)
 
     # Load the model states from checkpoint or initialize them.
     if checkpoint is not None:

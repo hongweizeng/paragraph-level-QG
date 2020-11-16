@@ -13,243 +13,116 @@ import torch.nn.functional as F
 import yaml
 import time
 from easydict import EasyDict
+from torch.optim.lr_scheduler import LambdaLR
+
 
 from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
 
-from utils import parse_configs, init_logger, logger, Statistics
-
-from data import setup_dataset, PAD_TOKEN, UNK_TOKEN, QgDataset, Example
+from utils import preprocess_args, init_logger, logger, Statistics
+from datasets.common import UNK_TOKEN, PAD_TOKEN, SOS_TOKEN, EOS_TOKEN, setup_iterator
 
 from trainer import Trainer
 from searcher import BeamSearcher, Hypothesis
 
-from model import setup_model
-
+# from model import setup_model
+from models.eanqg import setup_model, Model
+from models.utils import init_parameters, init_embeddings
 
 DEFAULT_CONFIG_NAME = 'config.json'
 DEFAULT_BEST_CHECKPOINT_NAME = 'best.ckpt'
+DEFAULT_LATEST_CHECKPOINT_NAME = 'latest.ckpt'
 
 
-def collate_function(examples,
-                     src_padding_idx=1, ans_padding_idx=1, feat_padding_idx=1, tgt_padding_idx=1,
-                     device=None):
+def collate_function(examples, pad_token_id=1, device=None):
     batch_size = len(examples)
 
-    examples.sort(key=lambda x: (len(x.src_ids), len(x.trg_ids)), reverse=True)
+    examples.sort(key=lambda x: (len(x.paragraph_ids), len(x.question_ids)), reverse=True)
     meta_data = [ex.meta_data for ex in examples]
-    oov_lst = [ex.oov_lst for ex in examples]
+    paragraph_oov_lst = [ex.paragraph_oov_lst for ex in examples]
+    evidences_oov_lst = [ex.evidences_oov_lst for ex in examples]
 
-    max_src_len = max(len(ex.src_ids) for ex in examples)
-    # max_src_len = min(max(len(ex.src_ids) for ex in examples), 200)     # TODO, handle this magic operation.
-    max_trg_len = max(len(ex.trg_ids) for ex in examples)
+    max_src_len = max(len(ex.paragraph_ids) for ex in examples)
+    max_trg_len = max(len(ex.question_ids) for ex in examples)
 
-    src_seqs = torch.LongTensor(batch_size, max_src_len).fill_(src_padding_idx).cuda(device)
-    ext_src_seqs = torch.LongTensor(batch_size, max_src_len).fill_(src_padding_idx).cuda(device)
+    paragraph_ids = torch.LongTensor(batch_size, max_src_len).fill_(pad_token_id).cuda(device)
+    paragraph_extended_ids = torch.LongTensor(batch_size, max_src_len).fill_(pad_token_id).cuda(device)
+    # paragraph_ans_tag_ids = torch.LongTensor(batch_size, max_src_len).cuda(device)
+    paragraph_ans_tag_ids = torch.ones([batch_size, max_src_len], dtype=torch.long, device=device)
+    paragraph_pos_tag_ids = torch.LongTensor(batch_size, max_src_len).cuda(device)
+    paragraph_ner_tag_ids = torch.LongTensor(batch_size, max_src_len).cuda(device)
+    paragraph_dep_tag_ids = torch.LongTensor(batch_size, max_src_len).cuda(device)
+    paragraph_cas_tag_ids = torch.LongTensor(batch_size, max_src_len).cuda(device)
 
-    tag_seqs = torch.LongTensor(batch_size, max_src_len).fill_(ans_padding_idx).cuda(device)
-    # pos_seq = torch.LongTensor(batch_size, max_src_len).fill_(feat_padding_idx).cuda(device)
-    # ner_seq = torch.LongTensor(batch_size, max_src_len).fill_(feat_padding_idx).cuda(device)
-    # cas_seq = torch.LongTensor(batch_size, max_src_len).fill_(feat_padding_idx).cuda(device)
+    evidences_ids = torch.LongTensor(batch_size, max_src_len).fill_(pad_token_id).cuda(device)
+    # evidences_ans_tag_ids = torch.LongTensor(batch_size, max_src_len).fill_(pad_token_id).cuda(device)
+    evidences_ans_tag_ids = torch.ones([batch_size, max_src_len], dtype=torch.long, device=device)
+    evidences_pos_tag_ids = torch.LongTensor(batch_size, max_src_len).cuda(device)
+    evidences_ner_tag_ids = torch.LongTensor(batch_size, max_src_len).cuda(device)
+    evidences_dep_tag_ids = torch.LongTensor(batch_size, max_src_len).cuda(device)
+    evidences_cas_tag_ids = torch.LongTensor(batch_size, max_src_len).cuda(device)
 
-    # relation_mask = torch.zeros([batch_size, max_src_len, max_src_len], dtype=torch.long, device=device)
-    coreference_mask = torch.zeros([batch_size, max_src_len, max_src_len], dtype=torch.long, device=device)
-    dependency_mask = torch.zeros([batch_size, max_src_len, max_src_len], dtype=torch.long, device=device)
-    constituency_mask = torch.zeros([batch_size, max_src_len, max_src_len], dtype=torch.long, device=device)
+    question_ids = torch.LongTensor(batch_size, max_trg_len).fill_(pad_token_id).cuda(device)
+    question_extended_ids_para = torch.LongTensor(batch_size, max_trg_len).fill_(pad_token_id).cuda(device)
+    question_extended_ids_evid = torch.LongTensor(batch_size, max_trg_len).fill_(pad_token_id).cuda(device)
 
-    dependency_hop_distance = torch.zeros([batch_size, max_src_len, max_src_len], dtype=torch.long, device=device)
-    constituency_hop_distance = torch.zeros([batch_size, max_src_len, max_src_len], dtype=torch.long, device=device)
-    coreference_hop_distance = torch.zeros([batch_size, max_src_len, max_src_len], dtype=torch.long, device=device)
-    dep_and_con_hop_distance = torch.zeros([batch_size, max_src_len, max_src_len], dtype=torch.long, device=device)
-    dep_and_cor_hop_distance = torch.zeros([batch_size, max_src_len, max_src_len], dtype=torch.long, device=device)
-    con_and_cor_hop_distance = torch.zeros([batch_size, max_src_len, max_src_len], dtype=torch.long, device=device)
-    all_hop_distance = torch.zeros([batch_size, max_src_len, max_src_len], dtype=torch.long, device=device)
-
-    trg_seqs = torch.LongTensor(batch_size, max_trg_len).fill_(tgt_padding_idx).cuda(device)
-    ext_trg_seqs = torch.LongTensor(batch_size, max_trg_len).fill_(tgt_padding_idx).cuda(device)
-
-
-
-    # batch = {'src': [], 'ans': [], 'pos': [], 'ner': [], 'cas': [], 'trg': []}
     for idx, example in enumerate(examples):
-        assert len(example.src_ids) == len(example.src_extended_ids) == len(example.ans_tag_ids)
-        src_seqs[idx, :len(example.src_ids)] = torch.tensor(example.src_ids)
-        ext_src_seqs[idx, :len(example.src_extended_ids)] = torch.tensor(example.src_extended_ids)
+        assert len(example.paragraph_ids) == len(example.paragraph_extended_ids) == len(example.paragraph_ans_tag_ids)
+        paragraph_ids[idx, :len(example.paragraph_ids)] = torch.tensor(example.paragraph_ids)
+        paragraph_extended_ids[idx, :len(example.paragraph_extended_ids)] = torch.tensor(example.paragraph_extended_ids)
+        paragraph_ans_tag_ids[idx, :len(example.paragraph_ans_tag_ids)] = torch.tensor(example.paragraph_ans_tag_ids)
+        paragraph_pos_tag_ids[idx, :len(example.paragraph_pos_tag_ids)] = torch.tensor(example.paragraph_pos_tag_ids)
+        paragraph_ner_tag_ids[idx, :len(example.paragraph_ner_tag_ids)] = torch.tensor(example.paragraph_ner_tag_ids)
+        paragraph_dep_tag_ids[idx, :len(example.paragraph_dep_tag_ids)] = torch.tensor(example.paragraph_dep_tag_ids)
+        paragraph_cas_tag_ids[idx, :len(example.paragraph_cas_tag_ids)] = torch.tensor(example.paragraph_cas_tag_ids)
 
-        tag_seqs[idx, :len(example.ans_tag_ids)] = torch.tensor(example.ans_tag_ids)
-        # pos_seq[idx, :len(example.ans_tag_ids)] = torch.tensor(example.ans_tag_ids)
-        # ner_seq[idx, :len(example.ans_tag_ids)] = torch.tensor(example.ans_tag_ids)
-        # cas_seq[idx, :len(example.ans_tag_ids)] = torch.tensor(example.ans_tag_ids)
+        evidences_ids[idx, :len(example.evidences_ids)] = torch.tensor(example.evidences_ids)
+        evidences_ans_tag_ids[idx, :len(example.evidences_ans_tag_ids)] = torch.tensor(example.evidences_ans_tag_ids)
+        evidences_pos_tag_ids[idx, :len(example.evidences_pos_tag_ids)] = torch.tensor(example.evidences_pos_tag_ids)
+        evidences_ner_tag_ids[idx, :len(example.evidences_ner_tag_ids)] = torch.tensor(example.evidences_ner_tag_ids)
+        evidences_dep_tag_ids[idx, :len(example.evidences_dep_tag_ids)] = torch.tensor(example.evidences_dep_tag_ids)
+        evidences_cas_tag_ids[idx, :len(example.evidences_cas_tag_ids)] = torch.tensor(example.evidences_cas_tag_ids)
 
-        # ——————————————————    HOP RELATION    --------------------------
-        coreference_mask[idx, :len(example.src_ids), :len(example.src_ids)] = \
-            torch.from_numpy(example.meta_data['coreference_mask_spatial'].todense())
-        dependency_mask[idx, :len(example.src_ids), :len(example.src_ids)] = \
-            torch.from_numpy(example.meta_data['dependency_mask_spatial'].todense())
-        constituency_mask[idx, :len(example.src_ids), :len(example.src_ids)] = \
-            torch.from_numpy(example.meta_data['constituency_mask_spatial'].todense())
-        # ——————————————————    HOP DISTANCE    --------------------------
-
-
-        # ——————————————————    HOP DISTANCE    --------------------------
-        dependency_hop_distance[idx, :len(example.src_ids), :len(example.src_ids)] = torch.from_numpy(
-            example.meta_data['dependency_hop_distance'])
-        constituency_hop_distance[idx, :len(example.src_ids), :len(example.src_ids)] = torch.from_numpy(
-            example.meta_data['constituency_hop_distance'])
-        coreference_hop_distance[idx, :len(example.src_ids), :len(example.src_ids)] = torch.from_numpy(
-            example.meta_data['coreference_hop_distance'])
-        dep_and_con_hop_distance[idx, :len(example.src_ids), :len(example.src_ids)] = torch.from_numpy(
-            example.meta_data['dep_and_con_hop_distance'])
-        dep_and_cor_hop_distance[idx, :len(example.src_ids), :len(example.src_ids)] = torch.from_numpy(
-            example.meta_data['dep_and_cor_hop_distance'])
-        con_and_cor_hop_distance[idx, :len(example.src_ids), :len(example.src_ids)] = torch.from_numpy(
-            example.meta_data['con_and_cor_hop_distance'])
-        all_hop_distance[idx, :len(example.src_ids), :len(example.src_ids)] = torch.from_numpy(
-            example.meta_data['all_hop_distance'])
-        # ——————————————————    HOP DISTANCE    --------------------------
+        assert len(example.question_ids) == len(example.question_extended_ids_para) == len(example.question_extended_ids_evid)
+        question_ids[idx, :len(example.question_ids)] = torch.tensor(example.question_ids)
+        question_extended_ids_para[idx, :len(example.question_extended_ids_para)] = torch.tensor(
+            example.question_extended_ids_para)
+        question_extended_ids_evid[idx, :len(example.question_extended_ids_evid)] = torch.tensor(
+            example.question_extended_ids_evid)
 
 
-        assert len(example.trg_ids) == len(example.trg_extended_ids)
-        trg_seqs[idx, :len(example.trg_ids)] = torch.tensor(example.trg_ids)
-        ext_trg_seqs[idx, :len(example.trg_extended_ids)] = torch.tensor(example.trg_extended_ids)
+    return EasyDict({'paragraph_ids': paragraph_ids, 'paragraph_extended_ids': paragraph_extended_ids,
+                     'paragraph_ans_tag_ids': paragraph_ans_tag_ids,
+                     'paragraph_pos_tag_ids': paragraph_pos_tag_ids, 'paragraph_ner_tag_ids': paragraph_ner_tag_ids,
+                     'paragraph_dep_tag_ids': paragraph_dep_tag_ids, 'paragraph_cas_tag_ids': paragraph_cas_tag_ids,
 
+                     'evidences_ids': evidences_ids,
+                     'evidences_ans_tag_ids': evidences_ans_tag_ids,
+                     'evidences_pos_tag_ids': evidences_pos_tag_ids, 'evidences_ner_tag_ids': evidences_ner_tag_ids,
+                     'evidences_dep_tag_ids': evidences_dep_tag_ids, 'evidences_cas_tag_ids': evidences_cas_tag_ids,
 
-    return EasyDict({'src_seq': src_seqs, 'ext_src_seq': ext_src_seqs, 'tag_seq': tag_seqs,
-                     'src_padding_index': src_padding_idx,
-                     'coreference_mask': coreference_mask,
-                     'dependency_mask': dependency_mask,
-                     'constituency_mask': constituency_mask,
-                     'dependency_hop_distance': dependency_hop_distance,
-                     'constituency_hop_distance': constituency_hop_distance,
-                     'coreference_hop_distance': coreference_hop_distance,
-                     'dep_and_con_hop_distance': dep_and_con_hop_distance,
-                     'dep_and_cor_hop_distance': dep_and_cor_hop_distance,
-                     'con_and_cor_hop_distance': con_and_cor_hop_distance,
-                     'all_hop_distance': all_hop_distance,
-                     'trg_seq': trg_seqs, 'ext_trg_seq': ext_trg_seqs,
-                     'oov_lst': oov_lst,
+                     'question_ids': question_ids,
+                     'question_extended_ids_para': question_extended_ids_para,
+                     'question_extended_ids_evid': question_extended_ids_evid,
+
+                     'paragraph_oov_lst': paragraph_oov_lst, 'evidences_oov_lst': evidences_oov_lst,
+
+                     'pad_token_id': pad_token_id,
+
                      'meta_data': meta_data, 'batch_size': batch_size})
-
-
-class CustomizedTrainer(Trainer):
-    def run_batch(self, batch_data):
-        # src_seq, ext_src_seq, trg_seq, ext_trg_seq, tag_seq, _ = batch
-        eos_trg = batch_data.trg_seq[:, 1:]
-        if self.config['use_pointer']:
-            eos_trg = batch_data.ext_trg_seq[:, 1:]
-
-        logits = self.model.forward(batch_data, src_padding_idx=self.padding_index)
-
-        batch_size, nsteps, _ = logits.size()
-        preds = logits.view(batch_size * nsteps, -1)
-        targets = eos_trg.contiguous().view(-1)
-        loss = self.criterion(preds, targets)
-
-        non_pad_mask = targets.ne(self.padding_index)
-        num_correct_words = preds.max(-1)[1].eq(targets).masked_select(non_pad_mask).sum().item()
-        num_words = non_pad_mask.sum().item()
-        batch_state = Statistics(loss.item(), num_words, num_correct_words)
-
-        return loss, batch_state
-
-
-class CustomizedSearcher(BeamSearcher):
-    def search_batch(self, batch_data):
-        src_seq, ext_src_seq, tag_seq = batch_data.src_seq, batch_data.ext_src_seq, batch_data.tag_seq
-        src_padding_idx = self.PAD_INDEX
-
-        enc_mask = (src_seq != src_padding_idx)
-
-        enc_outputs, enc_states = self.model.encoder(batch_data)
-
-        prev_context = torch.zeros(1, 1, enc_outputs.size(-1)).cuda(device=self.device)
-
-        h, c = enc_states  # [2, b, d] but b = 1
-        hypotheses = [Hypothesis(tokens=[self.TRG_SOS_INDEX],
-                                 log_probs=[0.0],
-                                 state=(h[:, 0, :], c[:, 0, :]),
-                                 context=prev_context[0]) for _ in range(self.beam_size)]
-        # tile enc_outputs, enc_mask for beam search
-        ext_src_seq = ext_src_seq.repeat(self.beam_size, 1)
-        enc_outputs = enc_outputs.repeat(self.beam_size, 1, 1)
-        enc_features = self.model.decoder.get_encoder_features(enc_outputs)
-        enc_mask = enc_mask.repeat(self.beam_size, 1)
-        num_steps = 0
-        results = []
-        while num_steps < self.config.max_decode_step and len(results) < self.beam_size:
-            latest_tokens = [h.latest_token for h in hypotheses]
-            latest_tokens = [idx if idx < len(
-                self.tok2idx) else self.TRG_UNK_INDEX for idx in latest_tokens]
-            prev_y = torch.tensor(latest_tokens, dtype=torch.long, device=self.device).view(-1)
-
-            # if config.use_gpu:
-            #     prev_y = prev_y.to(self.device)
-
-            # make batch of which size is beam size
-            all_state_h = []
-            all_state_c = []
-            all_context = []
-            for h in hypotheses:
-                state_h, state_c = h.state  # [num_layers, d]
-                all_state_h.append(state_h)
-                all_state_c.append(state_c)
-                all_context.append(h.context)
-
-            prev_h = torch.stack(all_state_h, dim=1)  # [num_layers, beam, d]
-            prev_c = torch.stack(all_state_c, dim=1)  # [num_layers, beam, d]
-            prev_context = torch.stack(all_context, dim=0)
-            prev_states = (prev_h, prev_c)
-            # [beam_size, |V|]
-            logits, states, context_vector = self.model.decoder.decode(prev_y, ext_src_seq,
-                                                                       prev_states, prev_context,
-                                                                       enc_features, enc_mask)
-            h_state, c_state = states
-            log_probs = F.log_softmax(logits, dim=1)
-            top_k_log_probs, top_k_ids \
-                = torch.topk(log_probs, self.beam_size * 2, dim=-1)
-
-            all_hypotheses = []
-            num_orig_hypotheses = 1 if num_steps == 0 else len(hypotheses)
-            for i in range(num_orig_hypotheses):
-                h = hypotheses[i]
-                state_i = (h_state[:, i, :], c_state[:, i, :])
-                context_i = context_vector[i]
-                for j in range(self.beam_size * 2):
-                    new_h = h.extend(token=top_k_ids[i][j].item(),
-                                     log_prob=top_k_log_probs[i][j].item(),
-                                     state=state_i,
-                                     context=context_i)
-                    all_hypotheses.append(new_h)
-
-            hypotheses = []
-            for h in self.sort_hypotheses(all_hypotheses):
-                if h.latest_token == self.TRG_EOS_INDEX:
-                    if num_steps >= self.min_decode_step:
-                        results.append(h)
-                else:
-                    hypotheses.append(h)
-
-                if len(hypotheses) == self.beam_size or len(results) == self.beam_size:
-                    break
-            num_steps += 1
-        if len(results) == 0:
-            results = hypotheses
-        h_sorted = self.sort_hypotheses(results)
-
-        return h_sorted[0]
 
 
 def main(args, device=None):
 
     if args.train:
         # 0. Configuration.
-        configs = parse_configs(args)
-        init_logger(configs['log_file'])
-        logger.info('Configs = %s' % configs)
+        config = preprocess_args(args)
+        init_logger(config['log_file'])
+        logger.info('Config = %s' % config)
 
         # Device
         # seed = args.seed
         seed = random.randint(1, 1000000)
-        configs.seed = seed
+        config.seed = seed
 
         random.seed(seed)
         np.random.seed(seed)
@@ -257,93 +130,142 @@ def main(args, device=None):
 
         # 1. Setup data
         logger.info('Setup data ...')
-        logger.info("Loading train dataset from %s" % configs['cached_train_path'])
-        train_dataset = torch.load(configs['cached_train_path'])
-        logger.info("Loading dev dataset from %s" % configs['cached_dev_path'])
-        valid_dataset = torch.load(configs['cached_dev_path'])
-        logger.info("Loading vocabularies from %s" % configs['cached_vocabularies_path'])
-        vocabularies = torch.load(configs['cached_vocabularies_path'])
+        logger.info("Loading train dataset from %s" % config['cached_train_path'])
+        train_dataset = torch.load(config['cached_train_path'])
+        logger.info("Loading dev dataset from %s" % config['cached_dev_path'])
+        valid_dataset = torch.load(config['cached_dev_path'])
+        logger.info("Loading vocabularies from %s" % config['cached_vocabularies_path'])
+        vocabularies = torch.load(config['cached_vocabularies_path'])
 
         PAD_INDEX = vocabularies['token'].stoi[PAD_TOKEN]
         TRG_UNK_INDEX = vocabularies['token'].stoi[UNK_TOKEN]
 
-        collate_fn = functools.partial(collate_function,
-                                       src_padding_idx=PAD_INDEX,
-                                       ans_padding_idx=PAD_INDEX,
-                                       feat_padding_idx=PAD_INDEX,
-                                       tgt_padding_idx=PAD_INDEX,
-                                       device=device)
+        # Some related configuration about embeddings.
+        config.model['vocab_size'] = len(vocabularies['token'])
+        config.model['feature_tag_vocab_size'] = len(vocabularies['feature'])
+        config.model['answer_tag_vocab_size'] = len(vocabularies['answer'])
+        config.model.pad_token_id = PAD_INDEX
+        config.model.unk_token_id = TRG_UNK_INDEX
 
-        train_iter = DataLoader(dataset=train_dataset, batch_size=configs['batch_size'],
-                                collate_fn=collate_fn, sampler=RandomSampler(train_dataset))
-        valid_iter = DataLoader(dataset=valid_dataset, batch_size=configs['batch_size'],
-                                collate_fn=collate_fn, sampler=SequentialSampler(valid_dataset))
+        # Save configuration.
+        config_object = {k: v for k, v in config.items()}
+        with open(os.path.join(config.save_path, DEFAULT_CONFIG_NAME), 'w') as json_writer:
+            json.dump(config_object, json_writer, indent=4)
+
+        collate_fn = functools.partial(collate_function, pad_token_id=PAD_INDEX, device=device)
+
+        train_iter = setup_iterator(dataset=train_dataset, collate_fn=collate_fn,
+                                    batch_size=config['batch_size'], random=True)
+        valid_iter = setup_iterator(dataset=valid_dataset, collate_fn=collate_fn,
+                                    batch_size=128, random=False)
 
         # 2. Setup model
-        logger.info('Building model ...')
-        model = setup_model(vocabularies, PAD_INDEX, TRG_UNK_INDEX, configs, device)
+        logger.info('Setup model ...')
+        model = Model(config['model'])
+        init_parameters(model, config)
+        logger.info('Initializing shared source and target embedding with glove.6B.300d.')
+        init_embeddings(model.embeddings.word_embeddings, vocabularies['token'])
+        model.to(device)
+        logger.info('Model = %s' % model)
+
+        # model = setup_model(vocabularies, PAD_INDEX, TRG_UNK_INDEX, config, device)
 
         # 3. Setup optimizer
-        # optimizer = torch.optim.SGD(model.parameters(), lr=configs.lr)
-        optimizer = torch.optim.Adam(model.parameters(), lr=configs['learning_rate'])
+        if config['optimizer_name'] == 'sgd':
+            # optimizer = torch.optim.SGD(model.parameters(), lr=config['sgd_learning_rate'])
+            optimizer = torch.optim.SGD(model.parameters(), lr=config['sgd_learning_rate'], momentum=0.8)
+            # optimizer = torch.optim.SGD(model.parameters(), lr=0.01, momentum=0.9, weight_decay=0.0001)
+            init_learning_rate = config['sgd_learning_rate']
+
+            criterion = nn.CrossEntropyLoss(ignore_index=PAD_INDEX)
+        else:
+            optimizer = torch.optim.Adam(model.parameters(), lr=config['adam_learning_rate'])
+            init_learning_rate = config.adam_learning_rate
+
+            criterion = nn.CrossEntropyLoss(ignore_index=PAD_INDEX, reduction='sum')
+
+        logger.info('Setup %s optimizer with initialized learning rate = %.5f' %
+                    (config.optimizer_name, init_learning_rate))
+
+        # lr_scheduler = LambdaLR(optimizer, lr_lambda=lambda lr: lr * 0.5)
+        lr_scheduler = None
 
         # 4. Setup criterion
-        criterion = nn.CrossEntropyLoss(ignore_index=PAD_INDEX, reduction='sum')
+        logger.info('Setup cross-entropy criterion ')
+        # criterion = nn.CrossEntropyLoss(ignore_index=PAD_INDEX, reduction='sum')
+        # criterion = nn.CrossEntropyLoss(ignore_index=PAD_INDEX)
 
         # 5. Setup trainer
-        trainer = CustomizedTrainer(vocabularies, model, optimizer, criterion, configs['save_path'], configs)
+        trainer = Trainer(vocabularies, model, optimizer, lr_scheduler, criterion, config['save_path'], config)
 
-        trainer.train(train_iter, valid_iter, configs.num_train_epochs, train_from=args.train_from)
+        trainer.train(train_iter, valid_iter, config.num_train_epochs, train_from=args.train_from)
+        # trainer.customized_train(train_iter, valid_iter, 20)
 
     if args.test:
-        # 0. Configuration.
         if not args.train:
-            assert args.test_from_dir is not None and os.path.isdir(args.test_from_dir), \
-                'Test directory %s is not valid' % args.test_from_dir
 
-            with open(os.path.join(args.test_from_dir, DEFAULT_CONFIG_NAME), 'r') as json_reader:
+            # 0. Configuration.
+            if args.test_from_dir is not None:
+                test_directory = args.test_from_dir
+                checkpoint_path = os.path.join(test_directory, DEFAULT_LATEST_CHECKPOINT_NAME)
+            elif args.test_from_model is not None:
+                test_directory  = os.path.dirname(args.test_from_model)
+                checkpoint_path = args.test_from_model
+
+            else:
+                raise NotImplementedError('Test directory %s is not valid' % args.test_from_dir)
+
+            with open(os.path.join(test_directory, DEFAULT_CONFIG_NAME), 'r') as json_reader:
                 config_object = json.load(json_reader)
-            configs = EasyDict(config_object)
+            config = EasyDict(config_object)
 
-        log_file = os.path.join(configs['save_path'], 'test.log')
+            config.save_path = test_directory
+        else:
+            checkpoint_path = os.path.join(config.save_path, DEFAULT_BEST_CHECKPOINT_NAME)
+
+        log_file = os.path.join(config.save_path, 'test.log')
         init_logger(log_file)
-        logger.info('Configs = %s' % configs)
-
-        checkpoint = os.path.join(configs['save_path'], DEFAULT_BEST_CHECKPOINT_NAME)
+        logger.info('config = %s' % config)
 
         # 1. Setup data
-        logger.info("Loading vocabularies from %s" % configs['cached_vocabularies_path'])
-        vocabularies = torch.load(configs['cached_vocabularies_path'])
+        logger.info("Loading vocabularies from %s" % config['cached_vocabularies_path'])
+        vocabularies = torch.load(config['cached_vocabularies_path'])
         PAD_INDEX = vocabularies['token'].stoi[PAD_TOKEN]
         TRG_UNK_INDEX = vocabularies['token'].stoi[UNK_TOKEN]
 
-        logger.info("Loading test dataset from %s" % configs['cached_test_path'])
-        test_dataset = torch.load(configs['cached_test_path'])
+        # Some related configuration about embeddings.
+        config.model['vocab_size'] = len(vocabularies['token'])
+        config.model['feature_tag_vocab_size'] = len(vocabularies['feature'])
+        config.model['answer_tag_vocab_size'] = len(vocabularies['answer'])
+        config.model.pad_token_id = PAD_INDEX
+        config.model.unk_token_id = TRG_UNK_INDEX
 
-        collate_fn = functools.partial(collate_function,
-                                       src_padding_idx=PAD_INDEX,
-                                       ans_padding_idx=PAD_INDEX,
-                                       feat_padding_idx=PAD_INDEX,
-                                       tgt_padding_idx=PAD_INDEX,
-                                       device=device)
+        logger.info("Loading test dataset from %s" % config['cached_test_path'])
+        test_dataset = torch.load(config.cached_test_path)
 
-        test_iter = DataLoader(dataset=test_dataset, batch_size=1,
-                                collate_fn=collate_fn, sampler=SequentialSampler(test_dataset))
+        collate_fn = functools.partial(collate_function, pad_token_id=PAD_INDEX, device=device)
+
+        test_iter = setup_iterator(dataset=test_dataset, collate_fn=collate_fn, batch_size=1, random=False)
 
         # 2. Setup model
         logger.info('Building model ...')
-        model = setup_model(vocabularies, PAD_INDEX, TRG_UNK_INDEX, configs, device, checkpoint)
+        # model = setup_model(vocabularies, PAD_INDEX, TRG_UNK_INDEX, config, device, checkpoint_path)
+        model = Model(config['model'])
+        logger.info('Loading checkpoint from %s' % checkpoint_path)
+        model.load_state_dict(torch.load(checkpoint_path))
+        model.to(device)
         model.eval()
 
         # 3. Setup searcher
-        searcher = CustomizedSearcher(vocabularies, test_iter, model, configs.save_path, device=device, config=configs)
+        searcher = BeamSearcher(vocabularies, test_iter, model, config.save_path,
+                                config.beam_size, config.min_decode_step, config.max_decode_step)
         searcher.search()
 
 
 if __name__ == '__main__':
-    # Configs
+    # config
     parser = argparse.ArgumentParser(description='SSR')
-    parser.add_argument('--config', '-config', type=str, default='configs/squad_split_v2.yml')
+    parser.add_argument('--config', '-config', type=str, default='configs/eanqg_squad_split_v2.yml')
 
     parser.add_argument('--gpu', '-gpu', type=int, default=0)
     parser.add_argument('--seed', '-seed', type=int, default=73157)
@@ -352,7 +274,10 @@ if __name__ == '__main__':
     parser.add_argument('--train_from', '-train_from', type=str, default=None)
 
     parser.add_argument('--test', '-test', action='store_true', default=False)
-    parser.add_argument('--test_from_dir', '-test_from_dir', type=str, default=None)
+    parser.add_argument('--test_from_dir', '-test_from_dir', type=str, default=None,
+                        help='directory')
+    parser.add_argument('--test_from_model', '-test_from_model', type=str, default=None,
+                        help='checkpoint')
 
 
     args = parser.parse_args()

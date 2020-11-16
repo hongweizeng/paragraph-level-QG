@@ -49,7 +49,7 @@ def process_features(examples, corpus_type, vocabularies):
     with tqdm(total=len(examples), desc='Processing %s features' % corpus_type) as t:
         for example in examples:
             # Paragraph Input
-            example.paragraph_ids, example.paragraph_extended_ids, example.oov_lst = context2ids(
+            example.paragraph_ids, example.paragraph_extended_ids, example.paragraph_oov_lst = context2ids(
                 example.meta_data['paragraph']['tokens'], vocabularies['token'].stoi)
             example.paragraph_ner_tag_ids = [vocabularies['feature'].stoi[tag]
                                              for tag in example.meta_data['paragraph']['ner_tags']]
@@ -63,7 +63,7 @@ def process_features(examples, corpus_type, vocabularies):
                                              for tag in example.meta_data['paragraph_ans_tag']]
 
             # Evidences Input
-            example.evidences_ids, _, _ = context2ids(
+            example.evidences_ids, example.evidences_extended_ids, example.evidences_oov_lst = context2ids(
                 example.meta_data['evidences']['tokens'], vocabularies['token'].stoi)
             example.evidences_ner_tag_ids = [vocabularies['feature'].stoi[tag]
                                              for tag in example.meta_data['evidences']['ner_tags']]
@@ -77,8 +77,11 @@ def process_features(examples, corpus_type, vocabularies):
                                              for tag in example.meta_data['evidences_ans_tag']]
 
             # Question Input
-            example.question_ids, example.question_extended_ids = question2ids(
-                example.meta_data['question']['tokens'], vocabularies['token'].stoi, example.oov_lst)
+            example.question_ids, example.question_extended_ids_para = question2ids(
+                example.meta_data['question']['tokens'], vocabularies['token'].stoi, example.paragraph_oov_lst)
+
+            _, example.question_extended_ids_evid = question2ids(
+                example.meta_data['question']['tokens'], vocabularies['token'].stoi, example.evidences_oov_lst)
 
             # Answer Input
             example.answer_ids, _, _ = context2ids(
@@ -106,14 +109,29 @@ def setup_dataset(directory, corpus_type, vocabularies, qas_id_dict, vocab_size=
     if recover and os.path.exists(cached_dataset_path) and os.path.exists(cached_vocabularies_path):
         logger.info('Loading %s dataset from %s' % (corpus_type, cached_dataset_path))
         dataset = torch.load(cached_dataset_path)
-        logger.info('Loading vocabularies from %s' % cached_vocabularies_path)
-        vocabularies = torch.load(cached_vocabularies_path)
-        return dataset, vocabularies
+        if corpus_type == 'train':
+            logger.info('Loading vocabularies from %s' % cached_vocabularies_path)
+            vocabularies = torch.load(cached_vocabularies_path)
+            return dataset, vocabularies
 
     if 'squad' in directory:
+        qas_id_dict = {**qas_id_dict['train'], **qas_id_dict['dev']}
         examples = read_squad_examples(directory=directory, corpus_type=corpus_type, qas_id_dict=qas_id_dict)
     elif 'newsqa' in directory:
         examples = read_newsqa_examples(directory=directory, corpus_type=corpus_type)
+    elif 'test' in directory:
+        from datasets.test import read_squad_examples_without_ids
+        if corpus_type == 'train':
+            this_qas_dict = qas_id_dict[corpus_type]
+        elif corpus_type == 'dev':
+            this_qas_dict = qas_id_dict[corpus_type].items()
+            num_dev = len(this_qas_dict)
+            this_qas_dict = this_qas_dict[:num_dev]
+        else:
+            this_qas_dict = qas_id_dict[corpus_type].items()
+            num_dev = len(this_qas_dict)
+            this_qas_dict = this_qas_dict[num_dev:]
+        examples = read_squad_examples_without_ids(directory=directory, corpus_type=corpus_type, qas_id_dict=this_qas_dict)
 
 
     if corpus_type == 'train':
@@ -132,9 +150,9 @@ def setup_dataset(directory, corpus_type, vocabularies, qas_id_dict, vocab_size=
 
 if __name__ == '__main__':
 
-    parser = argparse.ArgumentParser(description='SSR')
-    parser.add_argument('--dataset', '-dataset', type=str, default='newsqa',
-                        choices=['squad_split_v1', 'squad_split_v2', 'newsqa'])
+    parser = argparse.ArgumentParser(description='Paragraph-level QG')
+    parser.add_argument('--dataset', '-dataset', type=str, default='squad_split_v2',
+                        choices=['squad_split_v1', 'squad_split_v2', 'newsqa', 'test'])
     parser.add_argument('--data_dir', '-data_dir', type=str, default='data')
                         # choices=['data/squad_split_v1', 'data/squad_split_v2', 'data/newsqa'])
 
@@ -152,7 +170,7 @@ if __name__ == '__main__':
 
     data_directory = os.path.join(args.data_dir, args.dataset)
 
-    if 'squad' in data_directory:
+    if 'squad' in data_directory or 'test' in data_directory:
         squad_train_path = args.squad_train_path
         squad_dev_path = args.squad_dev_path
 
@@ -161,23 +179,19 @@ if __name__ == '__main__':
 
         train_qas_id_dict = read_squad_qas_dict(file_path=squad_train_path, save_path=cached_squad_train_path, recover=True)
         dev_qas_id_dict = read_squad_qas_dict(file_path=squad_dev_path, save_path=cached_squad_dev_path, recover=True)
-        squad_qas_id_dict = {**train_qas_id_dict, **dev_qas_id_dict}
+        # squad_qas_id_dict = {**train_qas_id_dict, **dev_qas_id_dict}
+        squad_qas_id_dict = {'train': train_qas_id_dict, 'dev':dev_qas_id_dict}
+
     elif 'newsqa' in data_directory:
         squad_qas_id_dict = None
-
-        from datasets.newsqa import read_newsqa_stories_dict
-        train_qas_id_dict = read_newsqa_stories_dict(file_path='data/newsqa/split_data/dev.csv',
-                                                     save_path='data/newsqa.dev.meta', recover=True)
-
-
     else:
         raise NotImplementedError('Dataset from %s is not implemented.' % data_directory)
 
     _, vocabularies = setup_dataset(directory=data_directory, corpus_type='train', qas_id_dict=squad_qas_id_dict,
-                  vocabularies=None, vocab_size=50000, min_word_frequency=3)
+                  vocabularies=None, vocab_size=20000, min_word_frequency=3, recover=False)
 
     setup_dataset(directory=data_directory, corpus_type='dev', qas_id_dict=squad_qas_id_dict,
-                  vocabularies=vocabularies)
+                  vocabularies=vocabularies, recover=False)
 
     setup_dataset(directory=data_directory, corpus_type='test', qas_id_dict=squad_qas_id_dict,
-                  vocabularies=vocabularies)
+                  vocabularies=vocabularies, recover=False)

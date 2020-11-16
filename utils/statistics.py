@@ -89,11 +89,12 @@ class Statistics(object):
         writer.add_scalar(prefix + "/tgtper", self.n_words / t, step)
         writer.add_scalar(prefix + "/lr", learning_rate, step)
 
-    def report_training_step_with_tqdm(self, tqdm_bar):
+    def report_training_step_with_tqdm(self, tqdm_bar, batch_loss=0):
         logging_metrics = {
             'acc': '%6.2f' % self.accuracy(),
             'ppl': '%5.5f' % self.ppl(),
-            'xent': '%4.5f' % self.xent()
+            'xent': '%4.5f' % self.xent(),
+            'loss': '%.3f' % batch_loss
         }
         tqdm_bar.set_postfix(**logging_metrics)
         tqdm_bar.update()
