@@ -1,8 +1,8 @@
 import torch
 import torch.nn as nn
 
-from .logging import logger
-from .statistics import Statistics, CopyStatistics
+from utils.logging import logger
+from utils.statistics import Statistics, CopyStatistics
 
 
 class Criterions(object):

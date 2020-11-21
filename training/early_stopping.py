@@ -3,7 +3,7 @@
 from enum import Enum
 from utils.logging import logger
 
-from .scorers import DEFAULT_SCORERS
+from utils.scorers import DEFAULT_SCORERS
 
 class PatienceEnum(Enum):
     IMPROVING = 0

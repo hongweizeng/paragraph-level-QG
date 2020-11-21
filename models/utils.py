@@ -4,6 +4,8 @@ from torch.nn.init import xavier_uniform_
 from torchtext.vocab import Vocab
 from transformers.modeling_utils import ModuleUtilsMixin
 
+import numpy
+
 
 class TrainedModel(nn.Module, ModuleUtilsMixin):
     pass
@@ -22,3 +24,19 @@ def init_parameters(model, config):
 def init_embeddings(embedding_module: nn.Embedding, vocabulary: Vocab, vectors='glove.6B.300d'):
     vocabulary.load_vectors(vectors)
     embedding_module.weight.data.copy_(vocabulary.vectors)
+
+
+def freeze_module(module):
+    for param in module.parameters():
+        param.requires_grad = False
+
+
+def unfreeze_module(module):
+    for param in module.parameters():
+        param.requires_grad = True
+
+
+def count_params(module):
+    module_parameters = filter(lambda p: p.requires_grad, module.parameters())
+    param_cnt = sum([numpy.prod(p.size()) for p in module_parameters])
+    return param_cnt

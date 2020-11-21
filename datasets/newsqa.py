@@ -3,6 +3,7 @@ import re
 import random
 from tqdm import tqdm
 import pandas as pd
+import nltk
 import stanza
 stanza_nlp = stanza.Pipeline('en', logging_level='WARN', processors='tokenize,mwt,pos,lemma,depparse,ner')
 
@@ -10,7 +11,7 @@ from utils.logging import logger
 from datasets.common import Example, get_answer_tag, parse_text_with_stanza
 
 
-def read_newsqa_examples(directory, corpus_type, recover=True):
+def read_newsqa_examples(directory, corpus_type, use_stanza=True):
 
     with open(os.path.join(directory, 'split_data/' + corpus_type + '.csv')) as csv_reader:
         articles = pd.read_csv(csv_reader, sep=',', header=0).values
@@ -23,18 +24,28 @@ def read_newsqa_examples(directory, corpus_type, recover=True):
             story_text = article[1]
             story_tokens = story_text.split()
             answer_token_ranges = [int(t) for t in re.split(',|:', article[3])]
+            answer_text = " ".join(story_tokens[answer_token_ranges[0]:answer_token_ranges[-1]])
+
+            # if answer_text in story_text:
+
             if answer_token_ranges[0] < 150:
                 paragraph_text = " ".join(story_tokens[:300])
             else:
                 paragraph_text = " ".join(story_tokens[answer_token_ranges[0]-150:answer_token_ranges[0]+150])
             paragraph_text = paragraph_text.replace("''", '" ').replace("``", '" ')
+
+            # if use_stanza:
             paragraph_stanza = stanza_nlp(paragraph_text)
             parsed_paragraph, paragraph_sentences = parse_text_with_stanza(paragraph_stanza.sentences)
+            # else:
+            #     parsed_paragraph = {'tokens': paragraph_text.split()}
+            #     paragraph_sentences = nltk.sent_tokenize(paragraph_text)
 
             # Question
             question_text = article[2].replace("''", '" ').replace("``", '" ')
             question_stanza = stanza_nlp(question_text)
             parsed_question, _ = parse_text_with_stanza(question_stanza.sentences)
+
 
             # Answer
             answer_text = " ".join(story_tokens[answer_token_ranges[0]:answer_token_ranges[-1]])

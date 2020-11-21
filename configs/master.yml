@@ -1,13 +1,13 @@
-setup: 'eanqg_squad_split_v2'
+setup: 'master'
 
 #########################################################################################################
 # ---------------------------------------- DATA CONFIGURATIONS ---------------------------------------- #
 #########################################################################################################
 
-cached_train_path: 'data/squad_split_v2/train.pt'
-cached_dev_path: 'data/squad_split_v2/dev.pt'
-cached_test_path: 'data/squad_split_v2/test.pt'
-cached_vocabularies_path: 'data/squad_split_v2/vocab.pt'
+cached_train_path: 'data/newsqa/train.pt'
+cached_dev_path: 'data/newsqa/dev.pt'
+cached_test_path: 'data/newsqa/test.pt'
+cached_vocabularies_path: 'data/newsqa/vocab.pt'
 
 vocab_size: 45000
 
@@ -22,13 +22,28 @@ max_target_length: 50
 ##########################################################################################################
 
 model:
+#    Embeddings
     embedding_size: 300
-
-    feature_num: 0
+    feature_num: 2
     feature_tag_embedding_size: 16
     answer_tag_embedding_size: 16
 
-    hidden_size: 512
+#   Encoder
+    brnn: True
+    enc_num_layers: 2
+    enc_rnn_size: 512
+
+#   Context Attention
+    ctx_attn_size: 512
+
+#   Decoder
+    input_feed: True
+    dec_rnn_size: 512
+    dec_num_layers: 2
+
+    maxout_pool_size: 2
+
+#    hidden_size: 512
     num_layers: 2
     dropout: 0.3
     layer_norm_eps: 0.000000000001
@@ -47,27 +62,52 @@ param_init_glorot: True
 
 cached_model_dir: checkpoints
 
-num_train_epochs: 10
+num_train_epochs: 20
 #num_train_steps: 25000
 #num_valid_steps: 500
 
 batch_size: 64
 
-optimizer_name: adam
+optimizer_name: sgd
+
 sgd_learning_rate: 0.1
+sgd_start_decay_at: 8
+
 adam_learning_rate: 0.001
+adam_start_decay_at: 2
+
+learning_rate_decay: 0.5
 
 max_grad_norm: 5.
 
 max_to_keep: 20
 
+optimizer:
+#    name
+    optim: sgd
+    learning_rate: 0.00025
+
+#   Learning rate scheduler: decay
+    learning_rate_decay: 0.75
+    decay_method: ''
+
+    start_decay_steps: 5000
+    decay_steps: 500
+
+    decay_bad_cnt: 5
+
+    n_warmup_steps: 10000
+
+#    parameter clip
+    max_grad_norm: 5
+    max_weight_value: 32
 
 #########################################################################################################
 # ------------------------------------- INFERENCE CONFIGURATIONS ------------------------------------- #
 #########################################################################################################
 
 beam_size: 10
-min_decode_step: 8
-max_decode_step: 30
+min_decode_step: 4
+max_decode_step: 40
 
 output: generated_question.txt

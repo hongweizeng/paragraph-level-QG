@@ -34,6 +34,10 @@ def outputids2words(id_list, idx2word, article_oovs=None, UNK_ID=0):
     return words
 
 
+def sort_hypotheses(hypotheses):
+    return sorted(hypotheses, key=lambda h: h.avg_log_prob, reverse=True)
+
+
 class Hypothesis(object):
     def __init__(self, tokens, log_probs, state, context=None):
         self.tokens = tokens
@@ -105,7 +109,13 @@ class Searcher(object):
         golden_fw = open(self.golden_dir, "w")
         t = tqdm(total=len(self.data_loader), unit='q', desc='Writing Questions:')
         for i, batch_data in enumerate(self.data_loader):
-            best_question = self.search_batch(batch_data)
+            # best_question = self.search_batch(batch_data) #TODO. reduce replicated codes.
+            best_question = self.model.beam_search(
+                batch_data=batch_data, beam_size=self.beam_size,
+                tok2idx=self.tok2idx,
+                TRG_SOS_INDEX=self.TRG_SOS_INDEX, TRG_UNK_INDEX=self.TRG_UNK_INDEX, TRG_EOS_INDEX=self.TRG_EOS_INDEX,
+                min_decode_step=self.min_decode_step, max_decode_step=self.max_decode_step, device=self.device)
+
             # discard START  token
             output_indices = [int(idx) for idx in best_question.tokens[1:-1]]
             decoded_words = outputids2words(
@@ -138,107 +148,5 @@ class Searcher(object):
 
         return references, hypothesis
 
-    def search_batch(self, batch_data):
-        raise NotImplementedError
-
-
-class BeamSearcher(Searcher):
-
-    @staticmethod
-    def sort_hypotheses(hypotheses):
-        return sorted(hypotheses, key=lambda h: h.avg_log_prob, reverse=True)
-
-
-    def search_batch(self, batch_data):
-        # src_seq, ext_src_seq, tag_seq = batch_data.src_seq, batch_data.ext_src_seq, batch_data.tag_seq
-        src_padding_idx = self.PAD_INDEX
-
-        # enc_mask = (batch_data.paragraph_ids != src_padding_idx)
-        attention_mask = (batch_data.paragraph_ids != batch_data.pad_token_id)
-        embedding_output_for_encoder = self.model.embeddings(input_ids=batch_data.paragraph_ids, feature_tag_ids_dict=None,
-                                                       answer_tag_ids=batch_data.paragraph_ans_tag_ids)
-        enc_outputs, enc_states = self.model.encoder(embedding_output_for_encoder, attention_mask)
-        # enc_outputs, enc_states = self.model.encoder(batch_data.paragraph_ids, batch_data.paragraph_ans_tag_ids, enc_mask)
-
-        prev_context = torch.zeros(1, 1, enc_outputs.size(-1)).cuda(device=self.device)
-
-        h, c = enc_states  # [2, b, d] but b = 1
-        hypotheses = [Hypothesis(tokens=[self.TRG_SOS_INDEX],
-                                 log_probs=[0.0],
-                                 state=(h[:, 0, :], c[:, 0, :]),
-                                 context=prev_context[0]) for _ in range(self.beam_size)]
-        # tile enc_outputs, enc_mask for beam search
-        ext_src_seq = batch_data.paragraph_extended_ids.repeat(self.beam_size, 1)
-        enc_outputs = enc_outputs.repeat(self.beam_size, 1, 1)
-        enc_features = self.model.decoder.get_encoder_features(enc_outputs)
-        enc_mask = attention_mask.repeat(self.beam_size, 1)
-        num_steps = 0
-        results = []
-        while num_steps < self.max_decode_step and len(results) < self.beam_size:
-            latest_tokens = [h.latest_token for h in hypotheses]
-            latest_tokens = [idx if idx < len(
-                self.tok2idx) else self.TRG_UNK_INDEX for idx in latest_tokens]
-            prev_y = torch.tensor(latest_tokens, dtype=torch.long, device=self.device).view(-1)
-
-            # if config.use_gpu:
-            #     prev_y = prev_y.to(self.device)
-
-            # make batch of which size is beam size
-            all_state_h = []
-            all_state_c = []
-            all_context = []
-            for h in hypotheses:
-                state_h, state_c = h.state  # [num_layers, d]
-                all_state_h.append(state_h)
-                all_state_c.append(state_c)
-                all_context.append(h.context)
-
-            prev_h = torch.stack(all_state_h, dim=1)  # [num_layers, beam, d]
-            prev_c = torch.stack(all_state_c, dim=1)  # [num_layers, beam, d]
-            prev_context = torch.stack(all_context, dim=0)
-            prev_states = (prev_h, prev_c)
-            # [beam_size, |V|]
-
-            embedded_prev_y = self.model.embeddings(prev_y)
-            logits, states, context_vector = self.model.decoder.decode(embedded_prev_y, ext_src_seq,
-                                                                       prev_states, prev_context,
-                                                                       enc_features, enc_mask)
-            h_state, c_state = states
-            log_probs = F.log_softmax(logits, dim=1)
-            top_k_log_probs, top_k_ids \
-                = torch.topk(log_probs, self.beam_size * 2, dim=-1)
-
-            all_hypotheses = []
-            num_orig_hypotheses = 1 if num_steps == 0 else len(hypotheses)
-            for i in range(num_orig_hypotheses):
-                h = hypotheses[i]
-                state_i = (h_state[:, i, :], c_state[:, i, :])
-                context_i = context_vector[i]
-                for j in range(self.beam_size * 2):
-                    new_h = h.extend(token=top_k_ids[i][j].item(),
-                                     log_prob=top_k_log_probs[i][j].item(),
-                                     state=state_i,
-                                     context=context_i)
-                    all_hypotheses.append(new_h)
-
-            hypotheses = []
-            for h in self.sort_hypotheses(all_hypotheses):
-                if h.latest_token == self.TRG_EOS_INDEX:
-                    if num_steps >= self.min_decode_step:
-                        results.append(h)
-                else:
-                    hypotheses.append(h)
-
-                if len(hypotheses) == self.beam_size or len(results) == self.beam_size:
-                    break
-            num_steps += 1
-        if len(results) == 0:
-            results = hypotheses
-        h_sorted = self.sort_hypotheses(results)
-
-        return h_sorted[0]
-
-
-class GreedySearcher(Searcher):
     def search_batch(self, batch_data):
         raise NotImplementedError

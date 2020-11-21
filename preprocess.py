@@ -121,17 +121,7 @@ def setup_dataset(directory, corpus_type, vocabularies, qas_id_dict, vocab_size=
         examples = read_newsqa_examples(directory=directory, corpus_type=corpus_type)
     elif 'test' in directory:
         from datasets.test import read_squad_examples_without_ids
-        if corpus_type == 'train':
-            this_qas_dict = qas_id_dict[corpus_type]
-        elif corpus_type == 'dev':
-            this_qas_dict = qas_id_dict[corpus_type].items()
-            num_dev = len(this_qas_dict)
-            this_qas_dict = this_qas_dict[:num_dev]
-        else:
-            this_qas_dict = qas_id_dict[corpus_type].items()
-            num_dev = len(this_qas_dict)
-            this_qas_dict = this_qas_dict[num_dev:]
-        examples = read_squad_examples_without_ids(directory=directory, corpus_type=corpus_type, qas_id_dict=this_qas_dict)
+        examples = read_squad_examples_without_ids(corpus_type=corpus_type, qas_id_dict=qas_id_dict)
 
 
     if corpus_type == 'train':
@@ -151,8 +141,8 @@ def setup_dataset(directory, corpus_type, vocabularies, qas_id_dict, vocab_size=
 if __name__ == '__main__':
 
     parser = argparse.ArgumentParser(description='Paragraph-level QG')
-    parser.add_argument('--dataset', '-dataset', type=str, default='squad_split_v2',
-                        choices=['squad_split_v1', 'squad_split_v2', 'newsqa', 'test'])
+    parser.add_argument('--dataset', '-dataset', type=str, default='newsqa_v2',
+                        choices=['squad_split_v1', 'squad_split_v2', 'newsqa_v2', 'test'])
     parser.add_argument('--data_dir', '-data_dir', type=str, default='data')
                         # choices=['data/squad_split_v1', 'data/squad_split_v2', 'data/newsqa'])
 

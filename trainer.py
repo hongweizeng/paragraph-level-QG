@@ -102,8 +102,10 @@ class Trainer(object):
     def train_from(self, train_from=None):
         if train_from is not None and os.path.exists(train_from):
             checkpoint = torch.load(train_from)
-            self.model.load_state_dict(checkpoint['model'])
-            start_epoch = checkpoint['epoch']
+            # self.model.load_state_dict(checkpoint['model'])
+            # start_epoch = checkpoint['epoch']
+            self.model.load_state_dict(checkpoint)
+            start_epoch = 10
         else:
             start_epoch = 0
         return start_epoch
@@ -130,7 +132,7 @@ class Trainer(object):
 
             # Learning rate scheduler
             # halving the learning rate after epoch 8
-            # self.adjust_learning_rate(epoch)
+            self.adjust_learning_rate(epoch)
             # if epoch >= 8 and epoch % 2 == 0:
             #     self.lr_scheduler.step()
 
@@ -176,8 +178,10 @@ class Trainer(object):
         if self.config['model'].use_pointer:
             eos_trg = batch_data.question_extended_ids_para[:, 1:]  #TODO, paragraph or evidences, that is a question.
 
-        logits = self.model(batch_data)
+        model_output = self.model(batch_data)
 
+        # Cross Entropy Loss
+        logits = model_output['logits']
         batch_size, nsteps, _ = logits.size()
         preds = logits.view(batch_size * nsteps, -1)
         targets = eos_trg.contiguous().view(-1)
@@ -189,6 +193,20 @@ class Trainer(object):
 
         batch_state = Statistics(loss.item(), num_words, num_correct_words)
 
+        # Coverage Loss
+        # avg_tmp_coverage = coverage_sum / (i + 1)
+        # coverage_loss = torch.sum(torch.min(energy, avg_tmp_coverage), dim=1)
+        attention_scores = model_output['attentions']
+        coverage_scores = model_output['coverages']
+
+        # coverage_loss = sum([torch.sum(torch.min(cov_score / (decoding_step + 1), attn_score))
+
+        coverage_loss = 0
+        for decoding_step, (cov_score, attn_score) in enumerate(zip(coverage_scores, attention_scores)):
+            step_coverage_loss = torch.min(cov_score / (decoding_step + 1), attn_score).sum()
+            coverage_loss += step_coverage_loss
+
+        loss = loss + coverage_loss * 0.0
         return loss, batch_state
 
     def report(self, stat):
@@ -197,7 +215,8 @@ class Trainer(object):
     def adjust_learning_rate(self, epoch):
         # halving the learning rate after epoch 8
         lr = self.optimizer.state_dict()["param_groups"][0]['lr']
-        if epoch >= 8 and epoch % 2 == 0:
+        # if epoch >= 2 and epoch % 2 == 0:     # TODO, this is for adam optimizer with learning_rate = 0.001
+        if epoch >= 8 and epoch % 2 == 0:       # TODO, this is for sgd optimizer with learning_rate = 0.1
             lr *= 0.5
             state_dict = self.optimizer.state_dict()
             for param_group in state_dict["param_groups"]:

@@ -22,7 +22,7 @@ def preprocess_args(args):
     # Checkpoint Management.
     cached_model_dir = os.path.join(config['cached_model_dir'], config['setup'])
     config.save_path = os.path.join(
-        cached_model_dir, "training_%d" % int(time.strftime("%Y%m%d%H%M%S")))
+        cached_model_dir, "training_%s" % time.strftime("%Y.%m.%d.%H:%M"))
     if not os.path.exists(config.save_path):
         os.makedirs(config.save_path)
 
