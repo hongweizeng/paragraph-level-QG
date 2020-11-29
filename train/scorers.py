@@ -49,33 +49,36 @@ class AccuracyScorer(Scorer):
         return stats.accuracy()
 
 
-DEFAULT_SCORERS = [PPLScorer(), AccuracyScorer()]
+class XentScorer(Scorer):
+
+    def __init__(self):
+        super(XentScorer, self).__init__(float("inf"), "xent")
+
+    def is_improving(self, stats):
+        return stats.xent() < self.best_score
+
+    def is_decreasing(self, stats):
+        return stats.xent() > self.best_score
+
+    def _caller(self, stats):
+        return stats.xent()
+
+
+DEFAULT_SCORERS = [PPLScorer(), AccuracyScorer(), XentScorer]
 
 SCORER_BUILDER = {
     "ppl": PPLScorer,
-    "accuracy": AccuracyScorer
+    "acc": AccuracyScorer,
+    "xent": XentScorer
 }
 
 
-def scorers_from_opts(opt):
-    if opt.early_stopping_criteria is None:
+def build_scorers(criteria):
+    if criteria is None:
         return DEFAULT_SCORERS
     else:
         scorers = []
-        for criterion in set(opt.early_stopping_criteria):
-            assert criterion in SCORER_BUILDER.keys(), \
-                "Criterion {} not found".format(criterion)
-            scorers.append(SCORER_BUILDER[criterion]())
-        return scorers
-
-
-def setup_scorers(configs):
-    if configs.early_stopping_criteria is None:
-        return DEFAULT_SCORERS
-    else:
-        scorers = []
-        for criterion in set(configs.early_stopping_criteria):
-            assert criterion in SCORER_BUILDER.keys(), \
-                "Criterion {} not found".format(criterion)
+        for criterion in set(criteria):
+            assert criterion in SCORER_BUILDER.keys(), "Criterion {} not found".format(criterion)
             scorers.append(SCORER_BUILDER[criterion]())
         return scorers

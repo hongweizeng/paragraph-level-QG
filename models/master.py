@@ -1,19 +1,13 @@
 from __future__ import division
 
-from easydict import EasyDict
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.utils.rnn import pad_packed_sequence, pack_padded_sequence
-from torch.nn.utils.rnn import pad_packed_sequence as unpack
-from torch.nn.utils.rnn import pack_padded_sequence as pack
 
-from torch_scatter import scatter_max, scatter_sum
-from torch.nn.init import xavier_uniform_
+from torch_scatter import scatter_max
 
-from utils import logger, freeze_module
-from searcher import Hypothesis, sort_hypotheses
+from search.searcher import Hypothesis, sort_hypotheses
 from models.modules.stacked_rnn import StackedGRU
 from models.modules.concat_attention import ConcatAttention
 from models.modules.maxout import MaxOut
@@ -256,7 +250,9 @@ class Decoder(nn.Module):
         memories = self.get_encoder_features(encoder_outputs)
         logits = []
         # init decoder hidden states and context vector
-        prev_states = init_states
+        # prev_states = init_states
+        prev_states = (init_states, init_states)
+
         prev_context = torch.zeros((batch_size, 1, hidden_size))
         prev_context = prev_context.to(device)
 
@@ -395,12 +391,14 @@ class DecoderV2(nn.Module):
         memories = encoder_outputs
 
         logits = []
+        energies = []
 
         # init decoder hidden states and context vector
         pre_hidden = self.init_rnn_hidden(enc_states)
         pre_context = torch.zeros((batch_size, hidden_size))
         pre_context = pre_context.to(device)
         pre_compute = None
+
         self.attn.applyMask(encoder_mask)
 
         coverage_output = []
@@ -418,7 +416,7 @@ class DecoderV2(nn.Module):
             output, hidden = self.rnn(input_emb, pre_hidden)
 
             # Encoder-Decoder Attention
-            context, attn_dist, pre_compute, energy = self.attn(output, memories, coverage, pre_compute)
+            context, attn_dist, pre_compute, energy = self.attn(output, memories, coverage, pre_compute, encoder_mask)
 
             # Maxout
             readout = self.readout(torch.cat((embedded, output, context), dim=1))
@@ -426,19 +424,21 @@ class DecoderV2(nn.Module):
             output = self.dropout(maxout)
             logit = self.logit_layer(output)  # [b, |V|]
 
-            # maxout pointer network
-            if self.use_pointer:
-                num_oov = max(torch.max(ext_src_seq - self.vocab_size + 1), 0)
-                # zeros = torch.zeros((batch_size, num_oov)).type(dtype=logit.dtype)      #TODO:
-                zeros = logit.data.new_zeros(size=(batch_size, num_oov))
-                extended_logit = torch.cat([logit, zeros], dim=1)
-                out = torch.zeros_like(extended_logit) - INF
-                out, _ = scatter_max(energy, ext_src_seq, out=out)      #TODO: scatter_sum.
-                out = out.masked_fill(out == -INF, 0)
-                logit = extended_logit + out
-                logit = logit.masked_fill(logit == 0, -INF)
+            # # maxout pointer network
+            # if self.use_pointer:
+            #     num_oov = max(torch.max(ext_src_seq - self.vocab_size + 1), 0)
+            #     # zeros = torch.zeros((batch_size, num_oov)).type(dtype=logit.dtype)      #TODO:
+            #     zeros = logit.data.new_zeros(size=(batch_size, num_oov))
+            #     extended_logit = torch.cat([logit, zeros], dim=1)
+            #     out = torch.zeros_like(extended_logit) - INF
+            #     out, _ = scatter_max(energy, ext_src_seq, out=out)      #TODO: scatter_sum.
+            #     # out = scatter_mean(energy, ext_src_seq, out=out)      #TODO: scatter_sum.
+            #     out = out.masked_fill(out == -INF, 0)
+            #     logit = extended_logit + out
+            #     logit = logit.masked_fill(logit == 0, -INF)
 
             logits.append(logit)
+            energies.append(energy)
 
             pre_context = context
             pre_hidden = hidden
@@ -449,10 +449,49 @@ class DecoderV2(nn.Module):
 
             coverage = coverage + attn_dist
 
-        logits = torch.stack(logits, dim=1)  # [b, t, |V|]
+        # logits = torch.stack(logits, dim=1)  # [b, t, |V|]
 
-        return logits, attention_output, coverage_output
+        return logits, attention_output, coverage_output, energies
 
+
+
+    def decode(self, embedded_y, ext_x, pre_hidden, prev_context, memories, encoder_mask, coverage, pre_compute=None):
+        # Embedding
+        input_emb = embedded_y
+        if self.input_feed:
+            input_emb = torch.cat([embedded_y, prev_context], 1)
+
+        # Decoder
+        output, hidden = self.rnn(input_emb, pre_hidden)
+
+        # Encoder-Decoder Attention
+        context, attn_dist, pre_compute, energy = self.attn(output, memories, coverage, pre_compute, encoder_mask)
+
+        # Maxout
+        readout = self.readout(torch.cat((embedded_y, output, context), dim=1))
+        maxout = self.maxout(readout)
+        output = self.dropout(maxout)
+        logit = self.logit_layer(output)  # [b, |V|]
+
+        coverage = coverage + attn_dist
+
+        if self.use_pointer:
+            # batch_size = y.size(0)
+            batch_size = embedded_y.size(0)
+            num_oov = max(torch.max(ext_x - self.vocab_size + 1), 0)
+            # zeros = torch.zeros((batch_size, num_oov)).type(dtype=logit.dtype)
+            zeros = logit.data.new_zeros(size=(batch_size, num_oov))
+            extended_logit = torch.cat([logit, zeros], dim=1)
+            out = torch.zeros_like(extended_logit) - INF
+            out, _ = scatter_max(energy, ext_x, out=out)
+            # out = scatter_mean(energy, ext_x, out=out)
+            out = out.masked_fill(out == -INF, 0)
+            logit = extended_logit + out
+            logit = logit.masked_fill(logit == -INF, 0)
+            # forcing UNK prob 0
+            logit[:, self.UNK_ID] = -INF
+
+        return logit, hidden, context, coverage, pre_compute
 
 
 
@@ -503,13 +542,14 @@ class Model(nn.Module):
         sos_trg = batch_data.question_ids[:, :-1].contiguous()
 
         embedding_output_for_decoder = self.embeddings(input_ids=sos_trg)
-        logits, attention_output, coverage_output = self.decoder(
+        logits, attention_output, coverage_output, energies = self.decoder(
             embedding_output_for_decoder, batch_data.paragraph_extended_ids, enc_states, enc_outputs, paragraph_mask)
 
         model_output = {
             'logits': logits,
             'attentions': attention_output,
-            'coverages': coverage_output
+            'coverages': coverage_output,
+            'energies': energies
         }
 
         return model_output
@@ -525,17 +565,22 @@ class Model(nn.Module):
         enc_outputs, enc_states = self.encoder(paragraph_embeddings, paragraph_mask,
                                                evidences_embeddings, evidences_mask)
 
-        prev_context = torch.zeros(1, 1, enc_outputs.size(-1)).cuda(device=device)
+        prev_context = torch.zeros(1, enc_outputs.size(-1)).cuda(device=device)
 
-        h, c = enc_states  # [2, b, d] but b = 1
+        coverage = enc_outputs.data.new_zeros(size=(1, enc_outputs.size(1)))
+
+        # h, c = enc_states  # [2, b, d] but b = 1
         hypotheses = [Hypothesis(tokens=[TRG_SOS_INDEX],
                                  log_probs=[0.0],
-                                 state=(h[:, 0, :], c[:, 0, :]),
-                                 context=prev_context[0]) for _ in range(beam_size)]
+                                 # state=(h[:, 0, :], c[:, 0, :]),
+                                 state=self.decoder.init_rnn_hidden(enc_states)[:, 0, :],
+                                 context=prev_context[0],
+                                 coverage=coverage[0]) for _ in range(beam_size)]
         # tile enc_outputs, enc_mask for beam search
         ext_src_seq = batch_data.paragraph_extended_ids.repeat(beam_size, 1)
         enc_outputs = enc_outputs.repeat(beam_size, 1, 1)
-        enc_features = self.decoder.get_encoder_features(enc_outputs)
+        # enc_features = self.decoder.get_encoder_features(enc_outputs)
+        memories = enc_outputs
         enc_mask = attention_mask.repeat(beam_size, 1)
         num_steps = 0
         results = []
@@ -549,26 +594,33 @@ class Model(nn.Module):
             #     prev_y = prev_y.to(self.device)
 
             # make batch of which size is beam size
-            all_state_h = []
-            all_state_c = []
+            # all_state_h = []
+            # all_state_c = []
+            all_state = []
             all_context = []
+            all_coverage = []
             for h in hypotheses:
-                state_h, state_c = h.state  # [num_layers, d]
-                all_state_h.append(state_h)
-                all_state_c.append(state_c)
+                # state_h, state_c = h.state  # [num_layers, d]
+                # all_state_h.append(state_h)
+                # all_state_c.append(state_c)
+                all_state.append(h.state)
                 all_context.append(h.context)
+                all_coverage.append(h.coverage)
 
-            prev_h = torch.stack(all_state_h, dim=1)  # [num_layers, beam, d]
-            prev_c = torch.stack(all_state_c, dim=1)  # [num_layers, beam, d]
+            # prev_h = torch.stack(all_state_h, dim=1)  # [num_layers, beam, d]
+            # prev_c = torch.stack(all_state_c, dim=1)  # [num_layers, beam, d]
+            # prev_states = (prev_h, prev_c)
+            prev_states = torch.stack(all_state, dim=1)  # [num_layers, beam, d]
             prev_context = torch.stack(all_context, dim=0)
-            prev_states = (prev_h, prev_c)
+            prev_coverage = torch.stack(all_coverage, dim=0)
             # [beam_size, |V|]
 
             embedded_prev_y = self.embeddings(prev_y)
-            logits, states, context_vector = self.decoder.decode(embedded_prev_y, ext_src_seq,
+            logits, states, context_vector, coverage_vector, pre_compute = self.decoder.decode(embedded_prev_y, ext_src_seq,
                                                                        prev_states, prev_context,
-                                                                       enc_features, enc_mask)
-            h_state, c_state = states
+                                                                       # enc_features, enc_mask)
+                                                                        memories, enc_mask, prev_coverage, pre_compute=None)
+            # h_state, c_state = states
             log_probs = F.log_softmax(logits, dim=1)
             top_k_log_probs, top_k_ids \
                 = torch.topk(log_probs, beam_size * 2, dim=-1)
@@ -577,20 +629,24 @@ class Model(nn.Module):
             num_orig_hypotheses = 1 if num_steps == 0 else len(hypotheses)
             for i in range(num_orig_hypotheses):
                 h = hypotheses[i]
-                state_i = (h_state[:, i, :], c_state[:, i, :])
+                # state_i = (h_state[:, i, :], c_state[:, i, :])
+                state_i = states[:, i, :]
                 context_i = context_vector[i]
+                coverage_i = coverage_vector[i]
                 for j in range(beam_size * 2):
 
+                    token = top_k_ids[i][j].item()
                     score = top_k_log_probs[i][j].item()
 
 
-                    vocab_entropy = torch.sum(-1 * log_probs[i] * torch.log(log_probs[i]), 1) / torch.log(len(tok2idx))
-                    copy_entropy = torch.sum(-1 * context_i * torch.log(context_i), 1) / torch.log(paragraph_embeddings.size(1))
+                    # vocab_entropy = torch.sum(-1 * log_probs[i] * torch.log(log_probs[i]), 1) / torch.log(len(tok2idx))
+                    # copy_entropy = torch.sum(-1 * context_i * torch.log(context_i), 1) / torch.log(paragraph_embeddings.size(1))
 
-                    new_h = h.extend(token=top_k_ids[i][j].item(),
-                                     log_prob=top_k_log_probs[i][j].item(),
+                    new_h = h.extend(token=token,
+                                     log_prob=score,
                                      state=state_i,
-                                     context=context_i)
+                                     context=context_i,
+                                     coverage=coverage_i)
                     all_hypotheses.append(new_h)
 
             hypotheses = []
@@ -609,82 +665,3 @@ class Model(nn.Module):
         h_sorted = sort_hypotheses(results)
 
         return h_sorted[0]
-
-
-def collate_function(examples, pad_token_id=1, device=None):
-    batch_size = len(examples)
-
-    examples.sort(key=lambda x: (len(x.paragraph_ids), len(x.question_ids)), reverse=True)
-    meta_data = [ex.meta_data for ex in examples]
-    paragraph_oov_lst = [ex.paragraph_oov_lst for ex in examples]
-    evidences_oov_lst = [ex.evidences_oov_lst for ex in examples]
-
-    max_src_len = max(len(ex.paragraph_ids) for ex in examples)
-    max_trg_len = max(len(ex.question_ids) for ex in examples)
-
-    paragraph_ids = torch.LongTensor(batch_size, max_src_len).fill_(pad_token_id).cuda(device)
-    paragraph_extended_ids = torch.LongTensor(batch_size, max_src_len).fill_(pad_token_id).cuda(device)
-    # paragraph_ans_tag_ids = torch.LongTensor(batch_size, max_src_len).cuda(device)
-    paragraph_ans_tag_ids = torch.ones([batch_size, max_src_len], dtype=torch.long, device=device)
-    paragraph_pos_tag_ids = torch.ones([batch_size, max_src_len], dtype=torch.long, device=device)
-    paragraph_ner_tag_ids = torch.ones([batch_size, max_src_len], dtype=torch.long, device=device)
-    paragraph_dep_tag_ids = torch.ones([batch_size, max_src_len], dtype=torch.long, device=device)
-    paragraph_cas_tag_ids = torch.ones([batch_size, max_src_len], dtype=torch.long, device=device)
-
-    max_evd_len = max(len(ex.evidences_ids) for ex in examples)
-    evidences_ids = torch.LongTensor(batch_size, max_evd_len).fill_(pad_token_id).cuda(device)
-    # evidences_ans_tag_ids = torch.LongTensor(batch_size, max_src_len).fill_(pad_token_id).cuda(device)
-    evidences_ans_tag_ids = torch.ones([batch_size, max_evd_len], dtype=torch.long, device=device)
-    evidences_pos_tag_ids = torch.ones([batch_size, max_evd_len], dtype=torch.long, device=device)
-    evidences_ner_tag_ids = torch.ones([batch_size, max_evd_len], dtype=torch.long, device=device)
-    evidences_dep_tag_ids = torch.ones([batch_size, max_evd_len], dtype=torch.long, device=device)
-    evidences_cas_tag_ids = torch.ones([batch_size, max_evd_len], dtype=torch.long, device=device)
-
-    question_ids = torch.LongTensor(batch_size, max_trg_len).fill_(pad_token_id).cuda(device)
-    question_extended_ids_para = torch.LongTensor(batch_size, max_trg_len).fill_(pad_token_id).cuda(device)
-    question_extended_ids_evid = torch.LongTensor(batch_size, max_trg_len).fill_(pad_token_id).cuda(device)
-
-    for idx, example in enumerate(examples):
-        assert len(example.paragraph_ids) == len(example.paragraph_extended_ids) == len(example.paragraph_ans_tag_ids)
-        paragraph_ids[idx, :len(example.paragraph_ids)] = torch.tensor(example.paragraph_ids)
-        paragraph_extended_ids[idx, :len(example.paragraph_extended_ids)] = torch.tensor(example.paragraph_extended_ids)
-        paragraph_ans_tag_ids[idx, :len(example.paragraph_ans_tag_ids)] = torch.tensor(example.paragraph_ans_tag_ids)
-        paragraph_pos_tag_ids[idx, :len(example.paragraph_pos_tag_ids)] = torch.tensor(example.paragraph_pos_tag_ids)
-        paragraph_ner_tag_ids[idx, :len(example.paragraph_ner_tag_ids)] = torch.tensor(example.paragraph_ner_tag_ids)
-        paragraph_dep_tag_ids[idx, :len(example.paragraph_dep_tag_ids)] = torch.tensor(example.paragraph_dep_tag_ids)
-        paragraph_cas_tag_ids[idx, :len(example.paragraph_cas_tag_ids)] = torch.tensor(example.paragraph_cas_tag_ids)
-
-        evidences_ids[idx, :len(example.evidences_ids)] = torch.tensor(example.evidences_ids)
-        evidences_ans_tag_ids[idx, :len(example.evidences_ans_tag_ids)] = torch.tensor(example.evidences_ans_tag_ids)
-        evidences_pos_tag_ids[idx, :len(example.evidences_pos_tag_ids)] = torch.tensor(example.evidences_pos_tag_ids)
-        evidences_ner_tag_ids[idx, :len(example.evidences_ner_tag_ids)] = torch.tensor(example.evidences_ner_tag_ids)
-        evidences_dep_tag_ids[idx, :len(example.evidences_dep_tag_ids)] = torch.tensor(example.evidences_dep_tag_ids)
-        evidences_cas_tag_ids[idx, :len(example.evidences_cas_tag_ids)] = torch.tensor(example.evidences_cas_tag_ids)
-
-        assert len(example.question_ids) == len(example.question_extended_ids_para) == len(example.question_extended_ids_evid)
-        question_ids[idx, :len(example.question_ids)] = torch.tensor(example.question_ids)
-        question_extended_ids_para[idx, :len(example.question_extended_ids_para)] = torch.tensor(
-            example.question_extended_ids_para)
-        question_extended_ids_evid[idx, :len(example.question_extended_ids_evid)] = torch.tensor(
-            example.question_extended_ids_evid)
-
-
-    return EasyDict({'paragraph_ids': paragraph_ids, 'paragraph_extended_ids': paragraph_extended_ids,
-                     'paragraph_ans_tag_ids': paragraph_ans_tag_ids,
-                     'paragraph_pos_tag_ids': paragraph_pos_tag_ids, 'paragraph_ner_tag_ids': paragraph_ner_tag_ids,
-                     'paragraph_dep_tag_ids': paragraph_dep_tag_ids, 'paragraph_cas_tag_ids': paragraph_cas_tag_ids,
-
-                     'evidences_ids': evidences_ids,
-                     'evidences_ans_tag_ids': evidences_ans_tag_ids,
-                     'evidences_pos_tag_ids': evidences_pos_tag_ids, 'evidences_ner_tag_ids': evidences_ner_tag_ids,
-                     'evidences_dep_tag_ids': evidences_dep_tag_ids, 'evidences_cas_tag_ids': evidences_cas_tag_ids,
-
-                     'question_ids': question_ids,
-                     'question_extended_ids_para': question_extended_ids_para,
-                     'question_extended_ids_evid': question_extended_ids_evid,
-
-                     'paragraph_oov_lst': paragraph_oov_lst, 'evidences_oov_lst': evidences_oov_lst,
-
-                     'pad_token_id': pad_token_id,
-
-                     'meta_data': meta_data, 'batch_size': batch_size})

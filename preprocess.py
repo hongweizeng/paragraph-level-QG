@@ -114,7 +114,7 @@ def setup_dataset(directory, corpus_type, vocabularies, qas_id_dict, vocab_size=
             vocabularies = torch.load(cached_vocabularies_path)
             return dataset, vocabularies
 
-    if 'squad' in directory:
+    if 'squad_v' in directory:
         qas_id_dict = {**qas_id_dict['train'], **qas_id_dict['dev']}
         examples = read_squad_examples(directory=directory, corpus_type=corpus_type, qas_id_dict=qas_id_dict)
     elif 'newsqa' in directory:
@@ -141,8 +141,8 @@ def setup_dataset(directory, corpus_type, vocabularies, qas_id_dict, vocab_size=
 if __name__ == '__main__':
 
     parser = argparse.ArgumentParser(description='Paragraph-level QG')
-    parser.add_argument('--dataset', '-dataset', type=str, default='newsqa_v2',
-                        choices=['squad_split_v1', 'squad_split_v2', 'newsqa_v2', 'test'])
+    parser.add_argument('--dataset', '-dataset', type=str, default='squad_test',
+                        choices=['squad_split_v1', 'squad_split_v2', 'newsqa_v2', 'squad_test'])
     parser.add_argument('--data_dir', '-data_dir', type=str, default='data')
                         # choices=['data/squad_split_v1', 'data/squad_split_v2', 'data/newsqa'])
 

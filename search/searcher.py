@@ -1,12 +1,14 @@
 import os
+import math
 import torch
 import torch.nn.functional as F
+import functools
 from tqdm import tqdm
 from easydict import EasyDict
 
-from utils import logger, count_params, Statistics
-from datasets.common import UNK_TOKEN, PAD_TOKEN, SOS_TOKEN, EOS_TOKEN
-
+from utils import logger
+from datasets.common import UNK_TOKEN, PAD_TOKEN, SOS_TOKEN, EOS_TOKEN, setup_iterator
+from datasets.collate_functions import master_collate_function
 
 def outputids2words(id_list, idx2word, article_oovs=None, UNK_ID=0):
     """
@@ -35,21 +37,27 @@ def outputids2words(id_list, idx2word, article_oovs=None, UNK_ID=0):
 
 
 def sort_hypotheses(hypotheses):
-    return sorted(hypotheses, key=lambda h: h.avg_log_prob, reverse=True)
+    return sorted(hypotheses, key=lambda h: h.score, reverse=True)
 
 
 class Hypothesis(object):
-    def __init__(self, tokens, log_probs, state, context=None):
+    def __init__(self, tokens, log_probs, state, context=None, coverage=None, uncertainty_scores=None, beta=0.):
         self.tokens = tokens
         self.log_probs = log_probs
         self.state = state
         self.context = context
+        self.coverage = coverage
+        self.uncertainty_scores = uncertainty_scores
 
-    def extend(self, token, log_prob, state, context=None):
+        self.beta = beta
+
+    def extend(self, token, log_prob, state, context=None, coverage=None, uncertainty_scores=None):
         h = Hypothesis(tokens=self.tokens + [token],
                        log_probs=self.log_probs + [log_prob],
                        state=state,
-                       context=context)
+                       context=context,
+                       coverage=coverage,
+                       uncertainty_scores=self.uncertainty_scores + [uncertainty_scores])
         return h
 
     @property
@@ -60,13 +68,28 @@ class Hypothesis(object):
     def avg_log_prob(self):
         return sum(self.log_probs) / len(self.tokens)
 
+    @property
+    def uncertainty_aware_score(self):
+        return 0.885 * sum(self.log_probs) / len(self.tokens) - 0.115 * math.log((sum(self.uncertainty_scores) / len(self.tokens)))
+
+    @property
+    def length(self):
+        return len(self.tokens)
+
+    @property
+    def score(self):
+        # return sum(self.log_probs) / len(self.tokens)
+        return (1 - self.beta) * sum(self.log_probs) / self.length - self.beta * math.log(sum(self.uncertainty_scores) / self.length)
+
+
 
 class Searcher(object):
-    def __init__(self, vocabularies, data_loader, model, output_dir,
-                 beam_size=1, min_decode_step=1, max_decode_step=100):
-        self.beam_size = beam_size
-        self.min_decode_step = min_decode_step
-        self.max_decode_step = max_decode_step
+    def __init__(self, vocabularies, test_dataset, model, output_dir, config):
+        self.beam_size = config.beam_size
+        self.min_decode_step = config.min_decode_step
+        self.max_decode_step = config.max_decode_step
+
+        self.beta = config.beta
 
         self.output_dir = output_dir
 
@@ -80,11 +103,14 @@ class Searcher(object):
         self.TRG_EOS_INDEX = vocabularies['token'].stoi[EOS_TOKEN]
         self.TRG_VOCAB_SIZE = len(vocabularies['token'])
 
-        self.data_loader = data_loader
-        self.test_data = data_loader.dataset
+        self.device = next(model.parameters()).device
+        collate_fn = functools.partial(master_collate_function, pad_token_id=self.PAD_INDEX, device=self.device)
+
+        self.data_loader = setup_iterator(dataset=test_dataset, collate_fn=collate_fn, batch_size=1, random=False)
+        self.test_data = test_dataset
 
         self.model = model
-        self.device = next(model.parameters()).device
+        # self.device = next(model.parameters()).device
 
         self.pred_dir = os.path.join(output_dir, "generated.txt")
         self.golden_dir = os.path.join(output_dir, "golden.txt")

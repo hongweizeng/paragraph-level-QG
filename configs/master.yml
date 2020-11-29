@@ -24,21 +24,21 @@ max_target_length: 50
 model:
 #    Embeddings
     embedding_size: 300
-    feature_num: 2
+    feature_num: 2      # feature_tags: ['pos', 'ner']
     feature_tag_embedding_size: 16
     answer_tag_embedding_size: 16
 
 #   Encoder
     brnn: True
     enc_num_layers: 2
-    enc_rnn_size: 512
+    enc_rnn_size: 256
 
 #   Context Attention
-    ctx_attn_size: 512
+    ctx_attn_size: 256
 
 #   Decoder
     input_feed: True
-    dec_rnn_size: 512
+    dec_rnn_size: 256
     dec_num_layers: 2
 
     maxout_pool_size: 2
@@ -57,57 +57,80 @@ param_init_glorot: True
 
 
 #########################################################################################################
-# -------------------------------------- TRAINING CONFIGURATIONS -------------------------------------- #
+# -------------------------------------- TRAIN CONFIGURATIONS ----------------------------------------- #
 #########################################################################################################
 
 cached_model_dir: checkpoints
 
-num_train_epochs: 20
-#num_train_steps: 25000
-#num_valid_steps: 500
 
-batch_size: 64
+train:
+    num_train_epochs: 30
+    #num_train_steps: 25000
+    valid_steps: 500
 
-optimizer_name: sgd
+    batch_size: 64
 
-sgd_learning_rate: 0.1
-sgd_start_decay_at: 8
+    optimizer:
+    #    name
+        optimizer_name: sgd
+#        optimizer_name: adam
+        learning_rate: 0.1
+#        learning_rate: 0.0007
+        momentum: 0.8
+        weight_decay: 0.000000      # L2 regularization.
+        adam_beta1: 0.9
+        adam_beta2: 0.999
 
-adam_learning_rate: 0.001
-adam_start_decay_at: 2
 
-learning_rate_decay: 0.5
+    #   Learning rate scheduler: decay
+        learning_rate_decay: 0.5
+        # empty will be converted to NoneType while 'Null' will be converted to a tuple
+        decay_method: Null
 
-max_grad_norm: 5.
+        start_decay_steps: 5
+        decay_steps: 5
 
-max_to_keep: 20
+        decay_bad_cnt: 2
 
-optimizer:
-#    name
-    optim: sgd
-    learning_rate: 0.00025
+        n_warmup_steps: 10000
 
-#   Learning rate scheduler: decay
-    learning_rate_decay: 0.75
-    decay_method: ''
+    #    parameter clip
+        max_grad_norm: 5
+        max_weight_value: 32
 
-    start_decay_steps: 5000
-    decay_steps: 500
+    criterion:
 
-    decay_bad_cnt: 5
+        reduction: 'mean'
 
-    n_warmup_steps: 10000
+        copy: True
+        copy_weight: 1.0
 
-#    parameter clip
-    max_grad_norm: 5
-    max_weight_value: 32
+        coverage: True
+        coverage_weight: 0.1
+
+    #   Checkpoint Manager
+    checkpoint:
+        max_to_keep: 10
+
+    scorer:
+        #   Early stop scheduler:
+#        start_stop_steps: 5000
+#        stop_steps: 200
+
+        criteria: ['acc']
+        tolerance: 10
+#        early_stop_tolerance: 8
+#        learning_rate_decay_tolerance: 2
+
+
 
 #########################################################################################################
 # ------------------------------------- INFERENCE CONFIGURATIONS ------------------------------------- #
 #########################################################################################################
 
-beam_size: 10
-min_decode_step: 4
-max_decode_step: 40
+inference:
+    beam_size: 10
+    min_decode_step: 4
+    max_decode_step: 40
 
-output: generated_question.txt
+    output: generated_question.txt

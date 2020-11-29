@@ -3,7 +3,7 @@
 from enum import Enum
 from utils.logging import logger
 
-from utils.scorers import DEFAULT_SCORERS
+from train.scorers import build_scorers
 
 class PatienceEnum(Enum):
     IMPROVING = 0
@@ -11,9 +11,9 @@ class PatienceEnum(Enum):
     STOPPED = 2
 
 
-class EarlyStopping(object):
+class ScorerManager(object):
 
-    def __init__(self, tolerance, scorers=None):
+    def __init__(self, config):
         """
             Callable class to keep track of early stopping.
             Args:
@@ -21,8 +21,9 @@ class EarlyStopping(object):
                 scorer(fn): list of scorers to validate performance on dev
         """
 
-        if scorers is None:
-            scorers = DEFAULT_SCORERS
+        tolerance = config['tolerance']
+        scorers = build_scorers(config['criteria'])
+
         self.tolerance = tolerance
         self.stalled_tolerance = self.tolerance
         self.current_tolerance = self.tolerance
@@ -119,5 +120,5 @@ class EarlyStopping(object):
     def is_improving(self):
         return self.status == PatienceEnum.IMPROVING
 
-    def has_stopped(self):
+    def early_stop(self):
         return self.status == PatienceEnum.STOPPED

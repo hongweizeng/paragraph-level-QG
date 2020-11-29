@@ -33,7 +33,7 @@ def preprocess_args(args):
     config.log_file = os.path.join(config.save_path, 'train.log')
 
     # Output
-    config.output =  os.path.join(config.save_path, config.output)
+    config['inference'].output =  os.path.join(config.save_path, config['inference'].output)
 
     config_object = {k: v for k, v in config.items()}
     with open(os.path.join(config.save_path, DEFAULT_CONFIG_NAME), 'w') as json_writer:

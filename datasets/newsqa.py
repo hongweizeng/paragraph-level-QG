@@ -19,6 +19,7 @@ def read_newsqa_examples(directory, corpus_type, use_stanza=True):
     unique_id = 0
     examples = []
     with tqdm(total=len(articles), desc='Reading %s dataset in directory %s' % (corpus_type, directory)) as t:
+        # for article in articles[:10]:
         for article in articles:
             # Paragraph
             story_text = article[1]

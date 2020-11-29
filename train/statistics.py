@@ -5,7 +5,7 @@ import time
 import math
 import sys
 
-from .logging import logger
+from utils.logging import logger
 
 
 class Statistics(object):
@@ -89,48 +89,58 @@ class Statistics(object):
         writer.add_scalar(prefix + "/tgtper", self.n_words / t, step)
         writer.add_scalar(prefix + "/lr", learning_rate, step)
 
-    def report_training_step_with_tqdm(self, tqdm_bar, batch_loss=0):
+    def report_training_step_with_tqdm(self, tqdm_bar):
         logging_metrics = {
             'acc': '%6.2f' % self.accuracy(),
             'ppl': '%5.5f' % self.ppl(),
             'xent': '%4.5f' % self.xent(),
-            'loss': '%.3f' % batch_loss
+            'loss': '%.3f' % self.loss
         }
         tqdm_bar.set_postfix(**logging_metrics)
         tqdm_bar.update()
 
-
-class CopyStatistics(Statistics):
-    def __init__(self, loss=0, n_words=0, n_correct=0, n_copy_words=0, n_copy_correct=0):
-        self.n_copy_words = n_copy_words
-        self.n_copy_correct = n_copy_correct
-        super(CopyStatistics, self).__init__(loss, n_words, n_correct)
-
-
-    def copy_accuracy(self):
-        """ compute accuracy """
-        return 100 * (self.n_copy_correct / self.n_copy_words)
-
-    def update(self, stat, update_n_src_words=False):
-        """
-        Update statistics by suming values with another `Statistics` object
-        Args:
-            stat: another statistic object
-            update_n_src_words(bool): whether to update (sum) `n_src_words`
-                or not
-        """
-        self.loss += stat.loss
-        self.n_words += stat.n_words
-        self.n_correct += stat.n_correct
-        self.n_copy_words += stat.n_copy_words
-        self.n_copy_correct += stat.n_copy_correct
-
-    def report_training_step_with_tqdm(self, tqdm_bar):
-        logging_metrics = {
-            'acc': '%6.2f' % self.accuracy(),
-            'ppl': '%5.2f' % self.ppl(),
-            'xent': '%4.2f' % self.xent(),
-            'c_acc': '%6.2f' % self.copy_accuracy(),
+    def scores(self):
+        score_dict = {
+            'acc': self.accuracy(),
+            'ppl': self.ppl(),
+            'xent': self.xent(),
+            'loss': self.loss
         }
-        tqdm_bar.set_postfix(**logging_metrics)
-        tqdm_bar.update()
+        # score_dict = dict(accuracy=self.accuracy(), perplexity=self.ppl(), cross_entropy=self.xent(), loss=self.loss)
+        return score_dict
+
+
+# class CopyStatistics(Statistics):
+#     def __init__(self, loss=0, n_words=0, n_correct=0, n_copy_words=0, n_copy_correct=0):
+#         self.n_copy_words = n_copy_words
+#         self.n_copy_correct = n_copy_correct
+#         super(CopyStatistics, self).__init__(loss, n_words, n_correct)
+#
+#
+#     def copy_accuracy(self):
+#         """ compute accuracy """
+#         return 100 * (self.n_copy_correct / self.n_copy_words)
+#
+#     def update(self, stat, update_n_src_words=False):
+#         """
+#         Update statistics by suming values with another `Statistics` object
+#         Args:
+#             stat: another statistic object
+#             update_n_src_words(bool): whether to update (sum) `n_src_words`
+#                 or not
+#         """
+#         self.loss += stat.loss
+#         self.n_words += stat.n_words
+#         self.n_correct += stat.n_correct
+#         self.n_copy_words += stat.n_copy_words
+#         self.n_copy_correct += stat.n_copy_correct
+#
+#     def report_training_step_with_tqdm(self, tqdm_bar):
+#         logging_metrics = {
+#             'acc': '%6.2f' % self.accuracy(),
+#             'ppl': '%5.2f' % self.ppl(),
+#             'xent': '%4.2f' % self.xent(),
+#             'c_acc': '%6.2f' % self.copy_accuracy(),
+#         }
+#         tqdm_bar.set_postfix(**logging_metrics)
+#         tqdm_bar.update()

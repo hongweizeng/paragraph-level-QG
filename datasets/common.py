@@ -11,6 +11,15 @@ PAD_TOKEN = "<pad>"
 SOS_TOKEN = "<s>"
 EOS_TOKEN = "</s>"
 
+UNK_TOKEN_NAME = 'UNK_TOKEN'
+PAD_TOKEN_NAME = 'PAD_TOKEN'
+SOS_TOKEN_NAME = 'SOS_TOKEN'
+EOS_TOKEN_NAME = 'EOS_TOKEN'
+
+UNK_INDEX_NAME = 'UNK_INDEX'
+PAD_INDEX_NAME = 'PAD_INDEX'
+SOS_INDEX_NAME = 'SOS_INDEX'
+EOS_INDEX_NAME = 'EOS_INDEX'
 
 class Example(object):
     def __init__(self, unique_id, meta_data):

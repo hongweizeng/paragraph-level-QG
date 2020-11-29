@@ -1,13 +1,13 @@
-setup: 'eanqg_newsqa'
+setup: 'eanqg_squad_test'
 
 #########################################################################################################
 # ---------------------------------------- DATA CONFIGURATIONS ---------------------------------------- #
 #########################################################################################################
 
-cached_train_path: 'data/newsqa/train.pt'
-cached_dev_path: 'data/newsqa/dev.pt'
-cached_test_path: 'data/newsqa/test.pt'
-cached_vocabularies_path: 'data/newsqa/vocab.pt'
+cached_train_path: 'data/squad_test/train.pt'
+cached_dev_path: 'data/squad_test/dev.pt'
+cached_test_path: 'data/squad_test/test.pt'
+cached_vocabularies_path: 'data/squad_test/vocab.pt'
 
 #cached_train_path: 'data/newsqa_v2/train.pt'
 #cached_dev_path: 'data/newsqa_v2/dev.pt'
@@ -136,10 +136,7 @@ train:
 
 inference:
     beam_size: 10
-    min_decode_step: 4
-    max_decode_step: 40
-
-#    beta: 0.115
-    beta: 0.0
+    min_decode_step: 6
+    max_decode_step: 50
 
     output: generated_question.txt
