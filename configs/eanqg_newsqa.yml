@@ -4,15 +4,15 @@ setup: 'eanqg_newsqa'
 # ---------------------------------------- DATA CONFIGURATIONS ---------------------------------------- #
 #########################################################################################################
 
-cached_train_path: 'data/newsqa/train.pt'
-cached_dev_path: 'data/newsqa/dev.pt'
-cached_test_path: 'data/newsqa/test.pt'
-cached_vocabularies_path: 'data/newsqa/vocab.pt'
-
-#cached_train_path: 'data/newsqa_v2/train.pt'
-#cached_dev_path: 'data/newsqa_v2/dev.pt'
-#cached_test_path: 'data/newsqa_v2/test.pt'
-#cached_vocabularies_path: 'data/newsqa_v2/vocab.pt'
+#cached_train_path: 'data/newsqa/train.pt'
+#cached_dev_path: 'data/newsqa/dev.pt'
+#cached_test_path: 'data/newsqa/test.pt'
+#cached_vocabularies_path: 'data/newsqa/vocab.pt'
+#
+cached_train_path: 'data/newsqa_v2/train.pt'
+cached_dev_path: 'data/newsqa_v2/dev.pt'
+cached_test_path: 'data/newsqa_v2/test.pt'
+cached_vocabularies_path: 'data/newsqa_v2/vocab.pt'
 
 vocab_size: 45000
 
@@ -34,6 +34,7 @@ model:
     answer_tag_embedding_size: 16
 
 #   Encoder
+    enc_rnn_type: 'GRU'         # choices: ['GRU', 'LSTM']
     brnn: True
     enc_num_layers: 2
     enc_rnn_size: 512
@@ -42,7 +43,11 @@ model:
     ctx_attn_size: 512
 
 #   Decoder
+    dec_rnn_type: 'GRU'         # choices: ['GRU', 'LSTM']
+
     input_feed: True
+    encoder_feed: False
+
     dec_rnn_size: 512
     dec_num_layers: 2
 
@@ -55,6 +60,10 @@ model:
     hidden_dropout_prob: 0.1
 
     use_pointer: True
+    use_coverage: True
+
+    pointer_scatter: 'sum'
+    coverage_scatter: 'sum'
 
 # Initialization
 param_init: 0.1
@@ -77,12 +86,12 @@ train:
 
     optimizer:
     #    name
-        optimizer_name: sgd
-#        optimizer_name: adam
-        learning_rate: 0.1
-#        learning_rate: 0.001
-        momentum: 0.8
-#        momentum: 0.0
+#        optimizer_name: sgd
+        optimizer_name: adam
+#        learning_rate: 0.1
+        learning_rate: 0.001
+#        momentum: 0.8
+        momentum: 0.0
         weight_decay: 0.000000      # L2 regularization.
         adam_beta1: 0.9
         adam_beta2: 0.999
@@ -93,8 +102,10 @@ train:
         # empty will be converted to NoneType while 'Null' will be converted to a tuple
         decay_method: Null
 
-        start_decay_steps: 5
-        decay_steps: 5
+        start_decay_steps: 6000
+        decay_steps: 500
+#        start_decay_steps: 5
+#        decay_steps: 5
 
         decay_bad_cnt: 2
 
@@ -112,19 +123,20 @@ train:
         copy_weight: 1.0
 
         coverage: True
-        coverage_weight: 0.1
+        coverage_weight: 0.0
+
+        coverage_scatter: 'max'  # [none|max|sum]
 
     #   Checkpoint Manager
     checkpoint:
         max_to_keep: 10
 
     scorer:
-        #   Early stop scheduler:
-#        start_stop_steps: 5000
-#        stop_steps: 200
-
+        #   Early stop scorer:
         criteria: ['acc']
         tolerance: 10
+
+        # Learning rate scorer
 #        early_stop_tolerance: 8
 #        learning_rate_decay_tolerance: 2
 
@@ -136,8 +148,8 @@ train:
 
 inference:
     beam_size: 10
-    min_decode_step: 4
-    max_decode_step: 40
+    min_decode_step: 6
+    max_decode_step: 50
 
 #    beta: 0.115
     beta: 0.0

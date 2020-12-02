@@ -14,7 +14,7 @@ from search.searcher import Searcher
 
 # from model import setup_model
 from models.utils import init_parameters, init_embeddings, freeze_module
-# from models.master_v2 import Model
+# from models.master import Model
 from models.eanqg import Model
 from train.checkpoint_manager import Checkpoint, CheckpointManager
 
@@ -137,9 +137,7 @@ def main(args, device=None):
 
         # 5. Setup trainer
         trainer = Trainer(train_dataset, valid_dataset,vocabularies, model, config)
-
         trainer.train(train_from=args.train_from)
-        # trainer.customized_train(train_iter, valid_iter, 20)
 
     if args.test:
         if not args.train:
@@ -197,7 +195,8 @@ def main(args, device=None):
         logger.info('Loading best checkpoint from directory %s' % config['save_path'])
         checkpoint_manager: CheckpointManager = CheckpointManager(config['train']['checkpoint'],
                                                                   save_path=config['save_path'])
-        checkpoint: Checkpoint = checkpoint_manager.load_best_checkpoint()
+        # checkpoint: Checkpoint = checkpoint_manager.load_best_checkpoint()
+        checkpoint: Checkpoint = checkpoint_manager.load_latest_checkpoint()
         model.load_state_dict(checkpoint.model_state_dict)
         model.to(device)
         model.eval()
@@ -211,8 +210,9 @@ def main(args, device=None):
 if __name__ == '__main__':
     # config
     parser = argparse.ArgumentParser(description='SSR')
-    parser.add_argument('--config', '-config', type=str, default='configs/eanqg_squad_test.yml',
-                        choices=['configs/eanqg_newsqa.yml', 'configs/master.yml', 'configs/eanqg_squad_v1.yml'])
+    parser.add_argument('--config', '-config', type=str, default='configs/test.yml',
+                        choices=['configs/du_acl2017.yml', 'configs/zhou_nlpcc2017.yml', 'configs/zhao_emnlp2018.yml',
+                                 'configs/eanqg_newsqa.yml', 'configs/test.yml', 'configs/master.yml'])
 
     parser.add_argument('--gpu', '-gpu', type=int, default=0)
     parser.add_argument('--seed', '-seed', type=int, default=73157)

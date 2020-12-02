@@ -21,6 +21,8 @@ from train.checkpoint_manager import Checkpoint, CheckpointManager
 from train.scorer_manager import ScorerManager
 from train.statistics import Statistics
 
+from search.searcher import Searcher
+
 DEFAULT_BEST_CHECKPOINT_NAME = 'best.ckpt'
 DEFAULT_LATEST_CHECKPOINT_NAME = 'latest.ckpt'
 
@@ -63,13 +65,9 @@ class Trainer(object):
 
         self.lr = self.optimizer._learning_rate
 
-        # self.save_path = save_path
-        # self.best_loss = 1e10
-        # self.cached_best_model = os.path.join(save_path, DEFAULT_BEST_CHECKPOINT_NAME)
-        # self.cached_latest_model = os.path.join(save_path, DEFAULT_LATEST_CHECKPOINT_NAME)
-        # self.max_to_keep = config['max_to_keep']
-        # if config['max_to_keep'] > 0:
-        #     self.checkpoint_queue = deque([], maxlen=config['max_to_keep'])
+        # 3. Setup searcher
+        search_config = config['inference']
+        self.searcher = Searcher(vocabularies, valid_dataset, model, config['save_path'], search_config)
 
         self.num_train_epochs = self.training_config['num_train_epochs']
         self.valid_steps = self.training_config['valid_steps']
@@ -106,10 +104,8 @@ class Trainer(object):
                 for step, batch_data in enumerate(self.train_iter):
                     self.model.train()
 
-                    # loss, batch_stat = self.run_batch(batch_data)
                     model_output = self.model(batch_data)
-                    # loss, batch_stat = self.criterion(batch_data, model_output)
-                    loss, batch_stat = self.criterion.compute_loss_v2(batch_data, model_output)
+                    loss, batch_stat = self.criterion(batch_data, model_output)
 
                     report_state.update(batch_stat)
                     report_state.report_training_step_with_tqdm(progress_bar)
@@ -120,14 +116,23 @@ class Trainer(object):
                     self.optimizer.backward(loss)
                     self.optimizer.step()
 
-                    if self.training_step % self.valid_steps == 0:
+                    # valid_stat = self.validation()
+                    # bleu_score = self.searcher.greedy_search()
+                    # TODO. [Just for reduce time， so we start validation after the start_decay_steps]
+                    if self.training_step % self.valid_steps == 0:# and self.training_step >= self.optimizer.start_decay_steps:
                         valid_stat = self.validation()
+
+                        # if self.training_step < self.optimizer.start_decay_steps:
+                        #     valid_stat.bleu += 0.1
+                        # else:
+                        #     bleu_score = self.searcher.greedy_search()
+                        #     valid_stat.bleu = bleu_score
 
                         # New line
                         print()
                         logger.info(
                             '[Validation (Epoch = %d, Step = %d)]: perplexity = %.3f, accuracy = %.2f, xent = %.5f,'
-                            ' loss = %.5f, lr=%.5f' % (epoch, self.training_step,
+                            ' loss = %.3f, lr=%.5f' % (epoch, self.training_step,
                              valid_stat.ppl(), valid_stat.accuracy(), valid_stat.xent(), valid_stat.loss,
                              self.optimizer.get_learning_rate()))
 
@@ -147,7 +152,7 @@ class Trainer(object):
                             checkpoint = Checkpoint(
                                 model_state_dict=self.model.state_dict(), optimizer_state_dict=self.optimizer.state_dict(),
                                 epoch_num=epoch, training_step=self.training_step, scores=valid_stat.scores())
-                            self.checkpoint_manager.save(checkpoint, is_improving)
+                            self.checkpoint_manager.save(checkpoint, is_improving, criteria=self.scorer_manager.criteria)
 
             progress_bar.close()
 
@@ -157,9 +162,7 @@ class Trainer(object):
         for step, batch_data in enumerate(self.valid_iter):
             with torch.no_grad():
                 model_output = self.model(batch_data)
-                # loss, batch_stat = self.criterion(batch_data, model_output)
-                # loss, batch_stat = self.criterion.compute_loss(batch_data, model_output)
-                loss, batch_stat = self.criterion.compute_loss_v2(batch_data, model_output)
+                loss, batch_stat = self.criterion(batch_data, model_output)
             report_state.update(batch_stat)
 
         return report_state

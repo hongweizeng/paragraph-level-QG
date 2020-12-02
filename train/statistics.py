@@ -25,6 +25,8 @@ class Statistics(object):
         self.n_src_words = 0
         self.start_time = time.time()
 
+        self.bleu = 0.  #TODO. remove this magic operation
+
     def update(self, stat, update_n_src_words=False):
         """
         Update statistics by suming values with another `Statistics` object
@@ -104,7 +106,8 @@ class Statistics(object):
             'acc': self.accuracy(),
             'ppl': self.ppl(),
             'xent': self.xent(),
-            'loss': self.loss
+            'loss': self.loss,
+            'bleu': self.bleu
         }
         # score_dict = dict(accuracy=self.accuracy(), perplexity=self.ppl(), cross_entropy=self.xent(), loss=self.loss)
         return score_dict

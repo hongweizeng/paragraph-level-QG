@@ -21,9 +21,12 @@ def init_parameters(model, config):
                 xavier_uniform_(p)
 
 
-def init_embeddings(embedding_module: nn.Embedding, vocabulary: Vocab, vectors='glove.6B.300d'):
+def init_embeddings(embedding_module: nn.Embedding, vocabulary: Vocab, vectors='glove.6B.300d', freeze=False):
     vocabulary.load_vectors(vectors)
     embedding_module.weight.data.copy_(vocabulary.vectors)
+
+    if freeze:
+        freeze_module(embedding_module)
 
 
 def freeze_module(module):

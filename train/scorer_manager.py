@@ -21,6 +21,7 @@ class ScorerManager(object):
                 scorer(fn): list of scorers to validate performance on dev
         """
 
+        self.criteria = config['criteria']
         tolerance = config['tolerance']
         scorers = build_scorers(config['criteria'])
 

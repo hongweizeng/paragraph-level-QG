@@ -5,6 +5,7 @@ import torch.nn.functional as F
 import functools
 from tqdm import tqdm
 from easydict import EasyDict
+from torchtext.data.metrics import bleu_score
 
 from utils import logger
 from datasets.common import UNK_TOKEN, PAD_TOKEN, SOS_TOKEN, EOS_TOKEN, setup_iterator
@@ -78,8 +79,10 @@ class Hypothesis(object):
 
     @property
     def score(self):
-        # return sum(self.log_probs) / len(self.tokens)
-        return (1 - self.beta) * sum(self.log_probs) / self.length - self.beta * math.log(sum(self.uncertainty_scores) / self.length)
+        if self.beta == 0.0:
+            return sum(self.log_probs) / len(self.tokens)
+        else:
+            return (1 - self.beta) * sum(self.log_probs) / self.length - self.beta * math.log(sum(self.uncertainty_scores) / self.length)
 
 
 
@@ -172,7 +175,37 @@ class Searcher(object):
         score = bleu_score(hypothesis, references) * 100
         logger.info('Bleu score = %.3f' % score)
 
-        return references, hypothesis
+        # return references, hypothesis
+        return score
 
     def search_batch(self, batch_data):
         raise NotImplementedError
+
+    def greedy_search(self):
+        references = []
+        hypothesis = []
+
+        for i, batch_data in enumerate(self.data_loader):
+            # best_question = self.search_batch(batch_data) #TODO. reduce replicated codes.
+            best_question = self.model.beam_search(
+                batch_data=batch_data, beam_size=1,
+                tok2idx=self.tok2idx,
+                TRG_SOS_INDEX=self.TRG_SOS_INDEX, TRG_UNK_INDEX=self.TRG_UNK_INDEX, TRG_EOS_INDEX=self.TRG_EOS_INDEX,
+                min_decode_step=self.min_decode_step, max_decode_step=self.max_decode_step, device=self.device)
+
+            # discard START  token
+            output_indices = [int(idx) for idx in best_question.tokens[1:-1]]
+            decoded_words = outputids2words(
+                output_indices, self.idx2tok, batch_data.paragraph_oov_lst[0], UNK_ID=self.TRG_UNK_INDEX)
+            try:
+                fst_stop_idx = decoded_words.index(self.TRG_EOS_INDEX)
+                decoded_words = decoded_words[:fst_stop_idx]
+            except ValueError:
+                decoded_words = decoded_words
+
+            golden_question = self.test_data[i].meta_data['question']['tokens']
+            references.append([golden_question])
+            hypothesis.append(decoded_words)
+
+        score = bleu_score(hypothesis, references) * 100
+        return score

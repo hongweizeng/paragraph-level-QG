@@ -64,6 +64,10 @@ class Optimizer(object):
         self._max_weight_value = config.max_weight_value
 
     @property
+    def start_decay_steps(self):
+        return self._start_decay_steps
+
+    @property
     def training_step(self):
         """The current training step."""
         return self._training_step

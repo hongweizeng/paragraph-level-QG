@@ -1,25 +1,14 @@
-setup: 'eanqg_squad_test'
+setup: 'zhou_nlpcc2017'
 
 #########################################################################################################
 # ---------------------------------------- DATA CONFIGURATIONS ---------------------------------------- #
 #########################################################################################################
 
-cached_train_path: 'data/squad_test/train.pt'
-cached_dev_path: 'data/squad_test/dev.pt'
-cached_test_path: 'data/squad_test/test.pt'
-cached_vocabularies_path: 'data/squad_test/vocab.pt'
+cached_train_path: 'data/zhou_nlpcc2017/train.pt'
+cached_dev_path: 'data/zhou_nlpcc2017/dev.pt'
+cached_test_path: 'data/zhou_nlpcc2017/test.pt'
+cached_vocabularies_path: 'data/zhou_nlpcc2017/vocab.pt'
 
-#cached_train_path: 'data/newsqa_v2/train.pt'
-#cached_dev_path: 'data/newsqa_v2/dev.pt'
-#cached_test_path: 'data/newsqa_v2/test.pt'
-#cached_vocabularies_path: 'data/newsqa_v2/vocab.pt'
-
-vocab_size: 45000
-
-min_word_frequency: 1
-
-max_source_length: 200
-max_target_length: 50
 
 
 ##########################################################################################################
@@ -34,6 +23,7 @@ model:
     answer_tag_embedding_size: 16
 
 #   Encoder
+    enc_rnn_type: 'GRU'         # choices: ['GRU', 'LSTM']
     brnn: True
     enc_num_layers: 2
     enc_rnn_size: 512
@@ -42,7 +32,11 @@ model:
     ctx_attn_size: 512
 
 #   Decoder
+    dec_rnn_type: 'GRU'         # choices: ['GRU', 'LSTM']
+
     input_feed: True
+    encoder_feed: True
+
     dec_rnn_size: 512
     dec_num_layers: 2
 
@@ -55,6 +49,10 @@ model:
     hidden_dropout_prob: 0.1
 
     use_pointer: True
+    use_coverage: True
+
+    pointer_scatter: 'sum'
+    coverage_scatter: 'sum'
 
 # Initialization
 param_init: 0.1
@@ -77,12 +75,12 @@ train:
 
     optimizer:
     #    name
-        optimizer_name: sgd
-#        optimizer_name: adam
-        learning_rate: 0.1
-#        learning_rate: 0.001
-        momentum: 0.8
-#        momentum: 0.0
+#        optimizer_name: sgd
+        optimizer_name: adam
+#        learning_rate: 0.1
+        learning_rate: 0.001
+#        momentum: 0.8
+        momentum: 0.0
         weight_decay: 0.000000      # L2 regularization.
         adam_beta1: 0.9
         adam_beta2: 0.999
@@ -93,8 +91,10 @@ train:
         # empty will be converted to NoneType while 'Null' will be converted to a tuple
         decay_method: Null
 
-        start_decay_steps: 5
-        decay_steps: 5
+        start_decay_steps: 5000
+        decay_steps: 500
+#        start_decay_steps: 5
+#        decay_steps: 5
 
         decay_bad_cnt: 2
 
@@ -112,19 +112,20 @@ train:
         copy_weight: 1.0
 
         coverage: True
-        coverage_weight: 0.1
+        coverage_weight: 0.4
+
+        coverage_scatter: 'max'  # [none|max|sum]
 
     #   Checkpoint Manager
     checkpoint:
         max_to_keep: 10
 
     scorer:
-        #   Early stop scheduler:
-#        start_stop_steps: 5000
-#        stop_steps: 200
-
+        #   Early stop scorer:
         criteria: ['acc']
         tolerance: 10
+
+        # Learning rate scorer
 #        early_stop_tolerance: 8
 #        learning_rate_decay_tolerance: 2
 
@@ -139,6 +140,7 @@ inference:
     min_decode_step: 6
     max_decode_step: 50
 
+#    beta: 0.115
     beta: 0.0
 
     output: generated_question.txt

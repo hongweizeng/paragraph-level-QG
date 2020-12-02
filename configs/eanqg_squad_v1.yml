@@ -112,7 +112,7 @@ train:
         copy_weight: 1.0
 
         coverage: True
-        coverage_weight: 0.1
+        coverage_weight: 0.4
 
     #   Checkpoint Manager
     checkpoint:
@@ -136,7 +136,9 @@ train:
 
 inference:
     beam_size: 10
-    min_decode_step: 4
-    max_decode_step: 40
+    min_decode_step: 6
+    max_decode_step: 50
+
+    beta: 0.0
 
     output: generated_question.txt

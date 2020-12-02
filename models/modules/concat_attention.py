@@ -3,7 +3,7 @@ import torch.nn as nn
 
 
 class ConcatAttention(nn.Module):  #generate current state via attention and hi
-    def __init__(self, attend_dim, query_dim, att_dim):
+    def __init__(self, attend_dim, query_dim, att_dim, use_coverage=False):
         super(ConcatAttention, self).__init__()
         self.attend_dim = attend_dim
         self.query_dim = query_dim
@@ -16,25 +16,34 @@ class ConcatAttention(nn.Module):  #generate current state via attention and hi
         self.tanh = nn.Tanh()
         self.mask = None
 
+        self.use_coverage = use_coverage
+
     def applyMask(self, mask):
         self.mask = mask.long()
 
-    def forward(self, input, context, coverage, precompute=None, encoder_mask=None):
+    def forward(self, input, context, coverage=None, precompute=None, encoder_mask=None):
         """
         input: batch x dim
         context: batch x sourceL x dim
         """
         if precompute is None:
-            precompute00 = self.linear_pre(context.contiguous().view(-1, context.size(2)))
-            precompute = precompute00.view(context.size(0), context.size(1), -1)  # batch x sourceL x att_dim
+            precompute = self.linear_pre(context)       # batch x sourceL x att_dim
         targetT = self.linear_q(input).unsqueeze(1)  # batch x 1 x att_dim
-        # Wc = self.linear_c(coverage.contiguous().unsqueeze(2).view(-1, 1))
-        # Wc = Wc.view(coverage.size(0), coverage.size(1), -1)
 
-        tmp10 = precompute + targetT.expand_as(precompute)  # batch x sourceL x att_dim
+        tmp_sum = precompute + targetT.expand_as(precompute)  # batch x sourceL x att_dim
+
+        if self.use_coverage:
+            Wc = self.linear_c(coverage.contiguous().unsqueeze(2))
+            # Wc = Wc.view(coverage.size(0), coverage.size(1), -1)
+            tmp_sum += Wc
+
+        tmp_activated = self.tanh(tmp_sum)  # batch x sourceL x att_dim
+        energy = self.linear_v(tmp_activated).view(tmp_sum.size(0), tmp_sum.size(1))  # batch x sourceL
+
+        # tmp10 = precompute + targetT.expand_as(precompute)  # batch x sourceL x att_dim
         # tmp10 = Wc + precompute + targetT.expand_as(precompute)  # batch x sourceL x att_dim
-        tmp20 = self.tanh(tmp10)  # batch x sourceL x att_dim
-        energy = self.linear_v(tmp20.view(-1, tmp20.size(2))).view(tmp20.size(0), tmp20.size(1))  # batch x sourceL
+        # tmp20 = self.tanh(tmp10)  # batch x sourceL x att_dim
+        # energy = self.linear_v(tmp20.view(-1, tmp20.size(2))).view(tmp20.size(0), tmp20.size(1))  # batch x sourceL
         if encoder_mask is not None:
             # energy.data.masked_fill_(self.mask, -float('inf'))
             # energy.masked_fill_(self.mask, -float('inf'))   # TODO: might be wrong
@@ -47,12 +56,12 @@ class ConcatAttention(nn.Module):  #generate current state via attention and hi
 
         return weightedContext, score, precompute, energy
 
-    def extra_repr(self):
-        return self.__class__.__name__ + '(' + str(self.att_dim) + ' * ' + '(' \
-               + str(self.attend_dim) + '->' + str(self.att_dim) + ' + ' \
-               + str(self.query_dim) + '->' + str(self.att_dim) + ')' + ')'
-
-    def __repr__(self):
-        return self.__class__.__name__ + '(' + str(self.att_dim) + ' * ' + '(' \
-               + str(self.attend_dim) + '->' + str(self.att_dim) + ' + ' \
-               + str(self.query_dim) + '->' + str(self.att_dim) + ')' + ')'
+    # def extra_repr(self):
+    #     return self.__class__.__name__ + '(' + str(self.att_dim) + ' * ' + '(' \
+    #            + str(self.attend_dim) + '->' + str(self.att_dim) + ' + ' \
+    #            + str(self.query_dim) + '->' + str(self.att_dim) + ')' + ')'
+    #
+    # def __repr__(self):
+    #     return self.__class__.__name__ + '(' + str(self.att_dim) + ' * ' + '(' \
+    #            + str(self.attend_dim) + '->' + str(self.att_dim) + ' + ' \
+    #            + str(self.query_dim) + '->' + str(self.att_dim) + ')' + ')'

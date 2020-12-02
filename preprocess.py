@@ -14,7 +14,7 @@ from datasets.common import setup_vocab, QgDataset, Example, UNK_TOKEN, PAD_TOKE
 
 
 from datasets.squad import read_squad_qas_dict, read_squad_examples
-from datasets.newsqa import read_newsqa_examples
+from datasets.newsqa import read_newsqa_examples, read_newsqa_meta
 
 
 def build_vocabularies(examples, vocab_size, min_word_frequency, directory):
@@ -114,11 +114,11 @@ def setup_dataset(directory, corpus_type, vocabularies, qas_id_dict, vocab_size=
             vocabularies = torch.load(cached_vocabularies_path)
             return dataset, vocabularies
 
-    if 'squad_v' in directory:
+    if 'du_acl2017' in directory or 'zhou_nlpcc2017' in directory:
         qas_id_dict = {**qas_id_dict['train'], **qas_id_dict['dev']}
         examples = read_squad_examples(directory=directory, corpus_type=corpus_type, qas_id_dict=qas_id_dict)
     elif 'newsqa' in directory:
-        examples = read_newsqa_examples(directory=directory, corpus_type=corpus_type)
+        examples = read_newsqa_examples(directory=directory, corpus_type=corpus_type, story_dict=qas_id_dict)
     elif 'test' in directory:
         from datasets.test import read_squad_examples_without_ids
         examples = read_squad_examples_without_ids(corpus_type=corpus_type, qas_id_dict=qas_id_dict)
@@ -141,8 +141,8 @@ def setup_dataset(directory, corpus_type, vocabularies, qas_id_dict, vocab_size=
 if __name__ == '__main__':
 
     parser = argparse.ArgumentParser(description='Paragraph-level QG')
-    parser.add_argument('--dataset', '-dataset', type=str, default='squad_test',
-                        choices=['squad_split_v1', 'squad_split_v2', 'newsqa_v2', 'squad_test'])
+    parser.add_argument('--dataset', '-dataset', type=str, default='du_acl2017',
+                        choices=['du_acl2017', 'zhou_nlpcc2017', 'newsqa_v2', 'squad_test'])
     parser.add_argument('--data_dir', '-data_dir', type=str, default='data')
                         # choices=['data/squad_split_v1', 'data/squad_split_v2', 'data/newsqa'])
 
@@ -152,15 +152,15 @@ if __name__ == '__main__':
                         type=str, default='data/dev-v1.1.json')
 
     parser.add_argument('--cached_squad_train_path', '-cached_squad_train_path',
-                        type=str, default='data/squad.train.meta')
+                        type=str, default='data/squad.train.meta_list')
     parser.add_argument('--cached_squad_dev_path', '-cached_squad_dev_path',
-                        type=str, default='data/squad.dev.meta')
+                        type=str, default='data/squad.dev.meta_list')
 
     args = parser.parse_args()
 
     data_directory = os.path.join(args.data_dir, args.dataset)
 
-    if 'squad' in data_directory or 'test' in data_directory:
+    if 'du_acl2017' in data_directory or 'zhou_nlpcc2017' in data_directory:
         squad_train_path = args.squad_train_path
         squad_dev_path = args.squad_dev_path
 
@@ -172,16 +172,25 @@ if __name__ == '__main__':
         # squad_qas_id_dict = {**train_qas_id_dict, **dev_qas_id_dict}
         squad_qas_id_dict = {'train': train_qas_id_dict, 'dev':dev_qas_id_dict}
 
+        train_meta = squad_qas_id_dict
+        dev_meta = squad_qas_id_dict
+        test_meta = squad_qas_id_dict
+
     elif 'newsqa' in data_directory:
+
+        train_meta = read_newsqa_meta(directory='data/newsqa', corpus_type='train', save_path='newsqa.train.meta', recover=True)
+        dev_meta = read_newsqa_meta(directory='data/newsqa', corpus_type='dev', save_path='newsqa.dev.meta', recover=True)
+        test_meta = read_newsqa_meta(directory='data/newsqa', corpus_type='test', save_path='newsqa.test.meta', recover=True)
+
         squad_qas_id_dict = None
     else:
         raise NotImplementedError('Dataset from %s is not implemented.' % data_directory)
 
-    _, vocabularies = setup_dataset(directory=data_directory, corpus_type='train', qas_id_dict=squad_qas_id_dict,
+    _, vocabularies = setup_dataset(directory=data_directory, corpus_type='train', qas_id_dict=train_meta,
                   vocabularies=None, vocab_size=20000, min_word_frequency=3, recover=False)
 
-    setup_dataset(directory=data_directory, corpus_type='dev', qas_id_dict=squad_qas_id_dict,
+    setup_dataset(directory=data_directory, corpus_type='dev', qas_id_dict=dev_meta,
                   vocabularies=vocabularies, recover=False)
 
-    setup_dataset(directory=data_directory, corpus_type='test', qas_id_dict=squad_qas_id_dict,
+    setup_dataset(directory=data_directory, corpus_type='test', qas_id_dict=test_meta,
                   vocabularies=vocabularies, recover=False)

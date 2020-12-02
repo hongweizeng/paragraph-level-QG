@@ -1,13 +1,13 @@
-setup: 'eanqg_squad_test'
+setup: 'zhao_emnlp2018'
 
 #########################################################################################################
 # ---------------------------------------- DATA CONFIGURATIONS ---------------------------------------- #
 #########################################################################################################
 
-cached_train_path: 'data/squad_test/train.pt'
-cached_dev_path: 'data/squad_test/dev.pt'
-cached_test_path: 'data/squad_test/test.pt'
-cached_vocabularies_path: 'data/squad_test/vocab.pt'
+cached_train_path: 'data/du_acl2017/train.pt'
+cached_dev_path: 'data/du_acl2017/test.pt'
+cached_test_path: 'data/du_acl2017/dev.pt'
+cached_vocabularies_path: 'data/du_acl2017/vocab.pt'
 
 #cached_train_path: 'data/newsqa_v2/train.pt'
 #cached_dev_path: 'data/newsqa_v2/dev.pt'
@@ -112,7 +112,7 @@ train:
         copy_weight: 1.0
 
         coverage: True
-        coverage_weight: 0.1
+        coverage_weight: 0.0
 
     #   Checkpoint Manager
     checkpoint:
@@ -139,6 +139,7 @@ inference:
     min_decode_step: 6
     max_decode_step: 50
 
+#    beta: 0.115
     beta: 0.0
 
     output: generated_question.txt

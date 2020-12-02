@@ -1,18 +1,18 @@
 from __future__ import division
-
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.utils.rnn import pad_packed_sequence, pack_padded_sequence
 
-from torch_scatter import scatter_max
+from torch_scatter import scatter_max, scatter_sum
 
 from search.searcher import Hypothesis, sort_hypotheses
-from models.modules.stacked_rnn import StackedGRU
-from models.modules.concat_attention import ConcatAttention
+from models.modules.stacked_rnn import StackedGRU, StackedLSTM
 from models.modules.maxout import MaxOut
 
 INF = 1e12
+
 
 class Embeddings(nn.Module):
     """Construct the embeddings from word, pos_tag, ner_tag, dep_tag, cas_tag and answer_tag embeddings.
@@ -106,37 +106,25 @@ class Encoder(nn.Module):
 
         self.num_directions = 2 if config.brnn else 1
         assert config.enc_rnn_size % self.num_directions == 0
+        # self.hidden_size = config.enc_rnn_size
+        # rnn_hidden_size = self.hidden_size // self.num_directions
         self.hidden_size = config.enc_rnn_size
         rnn_hidden_size = self.hidden_size // self.num_directions
-        # self.hidden_size = config.enc_rnn_size // self.num_directions
-        # rnn_hidden_size = self.hidden_size
-        self.rnn = nn.GRU(rnn_input_size, rnn_hidden_size,
-                          num_layers=config.enc_num_layers,
-                          dropout=config.dropout,
-                          bidirectional=config.brnn, batch_first=True)
+
+        assert config.enc_rnn_type in ['GRU', 'LSTM'], 'Encoder RNN type = %s is not supported.' % config.enc_rnn_type
+        self.rnn = getattr(nn, config.enc_rnn_type)(
+            rnn_input_size, rnn_hidden_size,
+            num_layers=config.enc_num_layers,
+            dropout=config.dropout,
+            bidirectional=config.brnn, batch_first=True)
+        # self.rnn = nn.GRU(rnn_input_size, rnn_hidden_size,
+        #                   num_layers=config.enc_num_layers,
+        #                   dropout=config.dropout,
+        #                   bidirectional=config.brnn, batch_first=True)
 
         self.wf =  nn.Linear(2 * self.hidden_size, self.hidden_size, bias=False)
         self.wg = nn.Linear(2 * self.hidden_size, self.hidden_size, bias=False)
         self.attn = BilinearSeqAttn(self.hidden_size, self.hidden_size)
-
-
-
-    def gated_self_attn(self, queries, memories, mask):
-        # queries: [b,t,d]
-        # memories: [b,t,d]
-        # mask: [b,t]
-        energies = torch.matmul(queries, memories.transpose(1, 2))  # [b, t, t]
-        mask = mask.unsqueeze(1)
-        energies = energies.masked_fill(mask == 0, value=-1e12)
-
-        scores = F.softmax(energies, dim=2)
-        context = torch.matmul(scores, queries)
-        inputs = torch.cat([queries, context], dim=2)
-        f_t = torch.tanh(self.update_layer(inputs))
-        g_t = torch.sigmoid(self.gate(inputs))
-        updated_output = g_t * f_t + (1 - g_t) * queries
-
-        return updated_output
 
     def forward(self, paragraph_embedded, paragraph_mask, evidences_embedded=None, evidences_mask=None):
 
@@ -197,151 +185,115 @@ class Encoder(nn.Module):
         # x = x.view(batch_size, J, 2 * self.hidden_size)
         x = x.view(batch_size, J, self.hidden_size)
 
+        if isinstance(paragraph_state, tuple):
+            h, c = paragraph_state
 
-        _, b, d = paragraph_state.size()
-        h = paragraph_state.view(2, 2, b, d)  # [n_layers, bi, b, d]
-        h = torch.cat((h[:, 0, :, :], h[:, 1, :, :]), dim=-1)
+            _, b, d = h.size()
+            h = h.view(-1, self.num_directions, b, d)  # [n_layers, bi, b, d]   (num_layers, num_directions, batch, hidden_size)
+            h = torch.cat((h[:, 0, :, :], h[:, -1, :, :]), dim=-1)       # n_layers, batch, hidden_size * num_directions
 
-        return x, h
+            c = c.view(-1, self.num_directions, b, d)  # [n_layers, bi, b, d]   (num_layers, num_directions, batch, hidden_size)
+            c = torch.cat((c[:, 0, :, :], c[:, -1, :, :]), dim=-1)       # n_layers, batch, hidden_size * num_directions
+
+            enc_state = (h, c)
+        else:
+            _, b, d = paragraph_state.size()
+
+            h = paragraph_state.view(-1, self.num_directions, b, d)  # [n_layers, bi, b, d]   (num_layers, num_directions, batch, hidden_size)
+            h = torch.cat((h[:, 0, :, :], h[:, -1, :, :]), dim=-1)  # n_layers, batch, hidden_size * num_directions
+
+            enc_state = h
+
+        return x, enc_state
+
+
+class ConcatAttention(nn.Module):  #generate current state via attention and hi
+    def __init__(self, attend_dim, query_dim, att_dim, use_coverage=False, coverage_scatter='none'):
+        super(ConcatAttention, self).__init__()
+        self.attend_dim = attend_dim
+        self.query_dim = query_dim
+        self.att_dim = att_dim
+        self.linear_pre = nn.Linear(attend_dim, att_dim, bias=True)
+        self.linear_q = nn.Linear(query_dim, att_dim, bias=False)
+        self.linear_v = nn.Linear(att_dim, 1, bias=False)
+        self.linear_c = nn.Linear(1, att_dim, bias=False)
+        self.sm = nn.Softmax(dim=1)
+        self.tanh = nn.Tanh()
+        self.mask = None
+
+        self.use_coverage = use_coverage
+        self.coverage_scatter = coverage_scatter
+
+    def applyMask(self, mask):
+        self.mask = mask.long()
+
+    def forward(self, input, context, coverage=None, precompute=None, encoder_mask=None, ext_src_seq=None):
+        """
+        input: batch x dim
+        context: batch x sourceL x dim
+        """
+        if precompute is None:
+            precompute = self.linear_pre(context)       # batch x sourceL x att_dim
+
+        if self.coverage_scatter == 'none':
+            extended_context = precompute
+        else:
+            extended_context = precompute.data.new_zeros(size=(coverage.size(0), coverage.size(1), precompute.size(2)))
+            if self.coverage_scatter == 'max':
+                extended_context, _ = scatter_max(precompute, ext_src_seq, out=extended_context, dim=1)  # TODO: scatter_sum.
+            else:
+                extended_context = scatter_sum(precompute, ext_src_seq, out=extended_context, dim=1)  # TODO: scatter_sum.
+
+        targetT = self.linear_q(input).unsqueeze(1)  # batch x 1 x att_dim
+
+        tmp_sum = precompute + targetT.expand_as(precompute)  # batch x sourceL x att_dim
+
+        if self.use_coverage:
+            Wc = self.linear_c(coverage.contiguous().unsqueeze(2))      # batch x (vocab_size + sourceL) x att_dim
+
+            if self.coverage_scatter == 'none':
+                extended_tmp_sum = tmp_sum
+            else:
+                extended_tmp_sum = tmp_sum.data.new_zeros(size=(coverage.size(0), coverage.size(1), tmp_sum.size(2)))
+                if self.coverage_scatter == 'max':
+                    extended_tmp_sum, _ = scatter_max(tmp_sum, ext_src_seq, out=extended_tmp_sum, dim=1)  # TODO: scatter_sum.
+                else:
+                    extended_tmp_sum = scatter_sum(tmp_sum, ext_src_seq, out=extended_tmp_sum, dim=1)  # TODO: scatter_sum.
+            extended_tmp_sum += Wc
+
+        tmp_activated = self.tanh(extended_tmp_sum)  # batch x sourceL x att_dim
+        energy = self.linear_v(tmp_activated).view(tmp_activated.size(0), tmp_activated.size(1))  # batch x sourceL
+
+        # tmp10 = precompute + targetT.expand_as(precompute)  # batch x sourceL x att_dim
+        # tmp10 = Wc + precompute + targetT.expand_as(precompute)  # batch x sourceL x att_dim
+        # tmp20 = self.tanh(tmp10)  # batch x sourceL x att_dim
+        # energy = self.linear_v(tmp20.view(-1, tmp20.size(2))).view(tmp20.size(0), tmp20.size(1))  # batch x sourceL
+        if encoder_mask is not None:
+            if self.coverage_scatter == 'none':
+                extended_mask = encoder_mask.long()
+            else:
+                extended_mask = encoder_mask.data.new_zeros(size=(coverage.size(0), coverage.size(1)), dtype=torch.long)
+                if self.coverage_scatter == 'max':
+                    extended_mask = scatter_sum(encoder_mask.long(), ext_src_seq, out=extended_mask)  # TODO: scatter_sum.
+                else:
+                    extended_mask, _ = scatter_max(encoder_mask.long(), ext_src_seq, out=extended_mask)  # TODO: scatter_sum.
+                # entended_mask.masked_fill(encoder_mask, 1)
+            # energy.data.masked_fill_(self.mask, -float('inf'))
+            # energy.masked_fill_(self.mask, -float('inf'))   # TODO: might be wrong
+            # energy = energy.squeeze(1).masked_fill(self.mask == 0, value=-1e12)
+            # energy = energy * encoder_mask.long() + (1 - encoder_mask.long()) * (-1000000)      # 1 for true token, 0 for padding token.
+            energy = energy * extended_mask + (1 - extended_mask) * (-1000000)      # 1 for true token, 0 for padding token.
+        score = self.sm(energy)
+        score_m = score.view(score.size(0), 1, score.size(1))  # batch x 1 x sourceL
+
+        weightedContext = torch.bmm(score_m, extended_context).squeeze(1)  # batch x dim
+
+        return weightedContext, score, precompute, energy
 
 
 class Decoder(nn.Module):
     def __init__(self, config):
-        super().__init__()
-        self.vocab_size = config.vocab_size
-
-        hidden_size = config.dec_rnn_size
-
-        self.encoder_trans = nn.Linear(hidden_size, hidden_size)
-        self.reduce_layer = nn.Linear(
-            config.embedding_size + hidden_size, config.embedding_size)
-        self.lstm = nn.LSTM(config.embedding_size, hidden_size, batch_first=True,
-                            num_layers=config.dec_num_layers, bidirectional=False, dropout=config.dropout)
-        self.concat_layer = nn.Linear(2 * hidden_size, hidden_size)
-        self.logit_layer = nn.Linear(hidden_size, config.vocab_size)
-
-        self.use_pointer = config.use_pointer
-        self.UNK_ID = config.unk_token_id
-
-    @staticmethod
-    def attention(query, memories, mask):
-        # query : [b, 1, d]
-        energy = torch.matmul(query, memories.transpose(1, 2))  # [b, 1, t]
-        energy = energy.squeeze(1).masked_fill(mask == 0, value=-1e12)
-        attn_dist = F.softmax(energy, dim=1).unsqueeze(dim=1)  # [b, 1, t]
-        context_vector = torch.matmul(attn_dist, memories)  # [b, 1, d]
-
-        return context_vector, energy
-
-    def get_encoder_features(self, encoder_outputs):
-        return self.encoder_trans(encoder_outputs)
-
-    def forward(self, trg_seq_embedded, ext_src_seq, init_states, encoder_outputs, encoder_mask):
-        # trg_seq : [b,t]
-        # init_states : [2,b,d]
-        # encoder_outputs : [b,t,d]
-        # init_states : a tuple of [2, b, d]
-        # device = trg_seq.device
-        # batch_size, max_len = trg_seq.size()
-        device = trg_seq_embedded.device
-        batch_size, max_len, _ = trg_seq_embedded.size()
-
-        hidden_size = encoder_outputs.size(-1)
-        memories = self.get_encoder_features(encoder_outputs)
-        logits = []
-        # init decoder hidden states and context vector
-        # prev_states = init_states
-        prev_states = (init_states, init_states)
-
-        prev_context = torch.zeros((batch_size, 1, hidden_size))
-        prev_context = prev_context.to(device)
-
-        coverage_sum = None
-        coverage_output = []
-        attention_output = []
-
-        for i in range(max_len):
-            # y_i = trg_seq[:, i].unsqueeze(1)  # [b, 1]
-            # embedded = self.embedding(y_i)  # [b, 1, d]
-            embedded = trg_seq_embedded[:, i, :].unsqueeze(1)  # [b, 1, d]
-            lstm_inputs = self.reduce_layer(
-                torch.cat([embedded, prev_context], 2))
-            output, states = self.lstm(lstm_inputs, prev_states)
-            # encoder-decoder attention
-            context, energy = self.attention(output, memories, encoder_mask)
-            concat_input = torch.cat((output, context), dim=2).squeeze(dim=1)
-            logit_input = torch.tanh(self.concat_layer(concat_input))
-            logit = self.logit_layer(logit_input)  # [b, |V|]
-
-            # maxout pointer network
-            if self.use_pointer:
-                num_oov = max(torch.max(ext_src_seq - self.vocab_size + 1), 0)
-                # zeros = torch.zeros((batch_size, num_oov)).type(dtype=logit.dtype)      #TODO:
-                zeros = logit.data.new_zeros(size=(batch_size, num_oov))
-                extended_logit = torch.cat([logit, zeros], dim=1)
-                out = torch.zeros_like(extended_logit) - INF
-                out, _ = scatter_max(energy, ext_src_seq, out=out)      #TODO: scatter_sum.
-                out = out.masked_fill(out == -INF, 0)
-                logit = extended_logit + out
-                logit = logit.masked_fill(logit == 0, -INF)
-
-            logits.append(logit)
-            # update prev state and context
-            prev_states = states
-            prev_context = context
-
-            if coverage_sum is None:
-                # coverage_sum = context.data.new(encoder_outputs.size(0), encoder_outputs.size(1)).zero_().clone().detach()
-                coverage_sum = context.data.new_zeros(size=(encoder_outputs.size(0), encoder_outputs.size(1)))
-
-            # avg_tmp_coverage = coverage_sum / (i + 1)
-            # coverage_loss = torch.sum(torch.min(energy, avg_tmp_coverage), dim=1)
-            coverage_output.append(coverage_sum.data.clone())
-            attn_dist = F.softmax(energy, dim=1)  # [b, t]
-            attention_output.append(attn_dist)
-
-            coverage_sum += attn_dist
-
-        logits = torch.stack(logits, dim=1)  # [b, t, |V|]
-
-        return logits, attention_output, coverage_output
-
-    def decode(self, embedded_y, ext_x, prev_states, prev_context, encoder_features, encoder_mask):
-        # forward one step lstm
-        # y : [b]
-        # embedded = self.embedding(y.unsqueeze(1))
-        embedded = embedded_y.unsqueeze(1)
-        lstm_inputs = self.reduce_layer(torch.cat([embedded, prev_context], 2))
-        output, states = self.lstm(lstm_inputs, prev_states)
-
-        context, energy = self.attention(output,
-                                         encoder_features,
-                                         encoder_mask)
-        concat_input = torch.cat((output, context), 2).squeeze(1)
-        logit_input = torch.tanh(self.concat_layer(concat_input))
-        logit = self.logit_layer(logit_input)  # [b, |V|]
-
-        if self.use_pointer:
-            # batch_size = y.size(0)
-            batch_size = embedded_y.size(0)
-            num_oov = max(torch.max(ext_x - self.vocab_size + 1), 0)
-            # zeros = torch.zeros((batch_size, num_oov)).type(dtype=logit.dtype)
-            zeros = logit.data.new_zeros(size=(batch_size, num_oov))
-            extended_logit = torch.cat([logit, zeros], dim=1)
-            out = torch.zeros_like(extended_logit) - INF
-            out, _ = scatter_max(energy, ext_x, out=out)
-            out = out.masked_fill(out == -INF, 0)
-            logit = extended_logit + out
-            logit = logit.masked_fill(logit == -INF, 0)
-            # forcing UNK prob 0
-            logit[:, self.UNK_ID] = -INF
-
-        return logit, states, context
-
-
-class DecoderV2(nn.Module):
-    def __init__(self, config):
-        super(DecoderV2, self).__init__()
+        super(Decoder, self).__init__()
 
         self.vocab_size = config.vocab_size
 
@@ -351,14 +303,18 @@ class DecoderV2(nn.Module):
         if self.input_feed:
             input_size += config.enc_rnn_size
 
-
-        # num_directions = 2 if config.brnn else 1
-        # self.enc_dec_transformer = nn.Linear(config.enc_rnn_size // num_directions, config.dec_rnn_size)
         self.enc_dec_transformer = nn.Linear(config.enc_rnn_size, config.dec_rnn_size)
 
-        self.rnn = StackedGRU(config.dec_num_layers, input_size, config.dec_rnn_size, config.dropout)
+        self.dec_rnn_type = config.dec_rnn_type
+        if config.dec_rnn_type == 'GRU':
+            self.rnn = StackedGRU(config.dec_num_layers, input_size, config.dec_rnn_size, config.dropout)
+        else:
+            self.rnn = StackedLSTM(config.dec_num_layers, input_size, config.dec_rnn_size, config.dropout)
 
-        self.attn = ConcatAttention(config.enc_rnn_size, config.dec_rnn_size, config.ctx_attn_size)
+        self.use_coverage = config.use_coverage
+        self.coverage_scatter = config.coverage_scatter
+        self.attn = ConcatAttention(config.enc_rnn_size, config.dec_rnn_size, config.ctx_attn_size,
+                                    use_coverage=config.use_coverage, coverage_scatter=config.coverage_scatter)
 
         self.dropout = nn.Dropout(config.dropout)
 
@@ -366,7 +322,7 @@ class DecoderV2(nn.Module):
         self.maxout = MaxOut(config.maxout_pool_size)
         self.maxout_pool_size = config.maxout_pool_size
 
-        self.copySwitch_l1 = nn.Linear(config.enc_rnn_size + config.dec_rnn_size, 1)
+        self.copySwitch_l1 = nn.Linear(config.embedding_size + config.enc_rnn_size + config.dec_rnn_size, 1)
         # self.copySwitch2 = nn.Linear(opt.ctx_rnn_size + opt.dec_rnn_size, 1)
         self.hidden_size = config.dec_rnn_size
         # self.cover = []
@@ -376,10 +332,29 @@ class DecoderV2(nn.Module):
         self.use_pointer = config.use_pointer
         self.UNK_ID = config.unk_token_id
 
-    def init_rnn_hidden(self, enc_hidden):
-        # enc_hidden = torch.cat([enc_states[0], enc_states[-1]], dim=-1)
-        dec_hidden = self.enc_dec_transformer(enc_hidden)
-        return dec_hidden
+
+    def HLoss(self, res):
+        # S = nn.Softmax(dim=1)
+        # LS = nn.LogSoftmax(dim=1)
+        b = -1 * res * torch.log(res + 1e-8)
+        b = torch.sum(b, 1)
+        return b
+
+    def init_rnn_hidden(self, enc_hidden_state):
+        if self.dec_rnn_type == 'GRU':
+            enc_hidden_state = enc_hidden_state[0] if isinstance(enc_hidden_state, tuple) else enc_hidden_state
+            dec_hidden_state = self.enc_dec_transformer(enc_hidden_state)
+            return dec_hidden_state
+        else:
+            if isinstance(enc_hidden_state, tuple):
+                h = self.enc_dec_transformer(enc_hidden_state[0])
+                c = self.enc_dec_transformer(enc_hidden_state[1])
+            else:
+                h = self.enc_dec_transformer(enc_hidden_state)
+                c = h
+            dec_hidden_state = (h, c)
+            return dec_hidden_state
+
 
     def forward(self, trg_seq_embedded, ext_src_seq, enc_states, encoder_outputs, encoder_mask):
 
@@ -403,7 +378,14 @@ class DecoderV2(nn.Module):
 
         coverage_output = []
         attention_output = []
-        coverage = memories.data.new_zeros(size=(encoder_outputs.size(0), encoder_outputs.size(1)))
+
+        copy_gate_output = []
+
+        if self.coverage_scatter == 'none':
+            coverage = memories.data.new_zeros(size=(encoder_outputs.size(0), encoder_outputs.size(1)))
+        else:
+            num_oov = max(torch.max(ext_src_seq - self.vocab_size + 1), 0)
+            coverage = memories.data.new_zeros(size=(batch_size, self.vocab_size + num_oov))
 
         for i in range(max_len):
             # Embedding
@@ -416,26 +398,22 @@ class DecoderV2(nn.Module):
             output, hidden = self.rnn(input_emb, pre_hidden)
 
             # Encoder-Decoder Attention
-            context, attn_dist, pre_compute, energy = self.attn(output, memories, coverage, pre_compute, encoder_mask)
+            context, attn_dist, pre_compute, energy = self.attn(output, memories, coverage, pre_compute, encoder_mask,
+                                                                ext_src_seq)
+
+            # Copy Mechanism
+            copyProb = self.copySwitch_l1(torch.cat((embedded, output, context), dim=1))
+            # copyProb = self.copySwitch_l1(torch.cat((output, cur_context), dim=1))
+            # copyProb = self.tanh(copyProb)
+            # copyProb = self.copySwitch_l2(copyProb)
+            copyProb = torch.sigmoid(copyProb)
+            copy_gate_output += [copyProb]
 
             # Maxout
             readout = self.readout(torch.cat((embedded, output, context), dim=1))
             maxout = self.maxout(readout)
             output = self.dropout(maxout)
             logit = self.logit_layer(output)  # [b, |V|]
-
-            # # maxout pointer network
-            # if self.use_pointer:
-            #     num_oov = max(torch.max(ext_src_seq - self.vocab_size + 1), 0)
-            #     # zeros = torch.zeros((batch_size, num_oov)).type(dtype=logit.dtype)      #TODO:
-            #     zeros = logit.data.new_zeros(size=(batch_size, num_oov))
-            #     extended_logit = torch.cat([logit, zeros], dim=1)
-            #     out = torch.zeros_like(extended_logit) - INF
-            #     out, _ = scatter_max(energy, ext_src_seq, out=out)      #TODO: scatter_sum.
-            #     # out = scatter_mean(energy, ext_src_seq, out=out)      #TODO: scatter_sum.
-            #     out = out.masked_fill(out == -INF, 0)
-            #     logit = extended_logit + out
-            #     logit = logit.masked_fill(logit == 0, -INF)
 
             logits.append(logit)
             energies.append(energy)
@@ -451,7 +429,7 @@ class DecoderV2(nn.Module):
 
         # logits = torch.stack(logits, dim=1)  # [b, t, |V|]
 
-        return logits, attention_output, coverage_output, energies
+        return logits, attention_output, coverage_output, energies, copy_gate_output
 
 
 
@@ -465,7 +443,13 @@ class DecoderV2(nn.Module):
         output, hidden = self.rnn(input_emb, pre_hidden)
 
         # Encoder-Decoder Attention
-        context, attn_dist, pre_compute, energy = self.attn(output, memories, coverage, pre_compute, encoder_mask)
+        context, attn_dist, pre_compute, energy = self.attn(output, memories, coverage, pre_compute, encoder_mask,
+                                                            ext_x)
+
+        copyProb = self.copySwitch_l1(torch.cat((embedded_y, output, context), dim=1))
+        copyProb = torch.sigmoid(copyProb)
+
+        # copyGateOutputs = copyGateOutputs.view(-1, 1)  # 320 * 1
 
         # Maxout
         readout = self.readout(torch.cat((embedded_y, output, context), dim=1))
@@ -475,23 +459,57 @@ class DecoderV2(nn.Module):
 
         coverage = coverage + attn_dist
 
+        prob = torch.softmax(logit, dim=-1)
+        ut = 1.
         if self.use_pointer:
-            # batch_size = y.size(0)
+             # batch_size = embedded_y.size(0)
+            # num_oov = max(torch.max(ext_x - self.vocab_size + 1), 0)
+            # # zeros = torch.zeros((batch_size, num_oov)).type(dtype=logit.dtype)
+            # zeros = logit.data.new_zeros(size=(batch_size, num_oov))
+            # extended_logit = torch.cat([logit, zeros], dim=1)
+            # out = torch.zeros_like(extended_logit) - INF
+            # out, _ = scatter_max(energy, ext_x, out=out)
+            # # out = scatter_mean(energy, ext_x, out=out)
+            # out = out.masked_fill(out == -INF, 0)
+            # logit = extended_logit + out
+            # logit = logit.masked_fill(logit == -INF, 0)
+            # # forcing UNK prob 0
+            # logit[:, self.UNK_ID] = -INF
+
             batch_size = embedded_y.size(0)
             num_oov = max(torch.max(ext_x - self.vocab_size + 1), 0)
-            # zeros = torch.zeros((batch_size, num_oov)).type(dtype=logit.dtype)
+            # zeros = torch.zeros((batch_size, num_oov)).type(dtype=logit.dtype)      #TODO:
             zeros = logit.data.new_zeros(size=(batch_size, num_oov))
-            extended_logit = torch.cat([logit, zeros], dim=1)
-            out = torch.zeros_like(extended_logit) - INF
-            out, _ = scatter_max(energy, ext_x, out=out)
-            # out = scatter_mean(energy, ext_x, out=out)
-            out = out.masked_fill(out == -INF, 0)
-            logit = extended_logit + out
-            logit = logit.masked_fill(logit == -INF, 0)
-            # forcing UNK prob 0
-            logit[:, self.UNK_ID] = -INF
 
-        return logit, hidden, context, coverage, pre_compute
+            g_prob = torch.softmax(logit, dim=-1)
+            g_not_copy_prob = g_prob * (1. - copyProb)# + 1e-8
+            c_prob = torch.softmax(energy, dim=-1)
+            c_copy_prob = c_prob * copyProb# + 1e-8
+
+            extended_prob = torch.cat([g_not_copy_prob, zeros], dim=1)
+            # out = torch.zeros_like(extended_prob)  # - INF
+            # out, _ = scatter_max(c_copy_prob, ext_x, out=out)  # TODO: scatter_sum.
+            out = c_copy_prob
+            # out = out.masked_fill(out == -INF, 0)
+            prob = extended_prob + out
+            # prob = prob.masked_fill(prob == 0, -INF)
+            # # forcing UNK prob 0
+            prob[:, self.UNK_ID] = 1e-8
+
+            def HLoss(res):
+                # S = nn.Softmax(dim=1)
+                # LS = nn.LogSoftmax(dim=1)
+                b = -1 * res * torch.log(res)
+                b = torch.sum(b, 1)
+                return b
+
+            Hg = HLoss(g_prob).unsqueeze(-1) * (1 - copyProb) / math.log(self.vocab_size)
+            Hc = HLoss(c_prob).unsqueeze(-1) * copyProb / math.log(max(num_oov, 1))
+            ut = Hg + Hc
+
+
+        # return logit, hidden, context, coverage, pre_compute
+        return prob, ut, hidden, context, coverage, pre_compute
 
 
 
@@ -502,8 +520,7 @@ class Model(nn.Module):
 
         self.embeddings = Embeddings(config)
         self.encoder = Encoder(config)
-        # self.decoder = Decoder(config)
-        self.decoder = DecoderV2(config)
+        self.decoder = Decoder(config)
 
     def run_enc_embeddings(self, batch_data):
         paragraph_feature_tag_ids_dict = {
@@ -542,14 +559,15 @@ class Model(nn.Module):
         sos_trg = batch_data.question_ids[:, :-1].contiguous()
 
         embedding_output_for_decoder = self.embeddings(input_ids=sos_trg)
-        logits, attention_output, coverage_output, energies = self.decoder(
+        logits, attention_output, coverage_output, energies, copy_gate_output = self.decoder(
             embedding_output_for_decoder, batch_data.paragraph_extended_ids, enc_states, enc_outputs, paragraph_mask)
 
         model_output = {
             'logits': logits,
             'attentions': attention_output,
             'coverages': coverage_output,
-            'energies': energies
+            'energies': energies,
+            'copy_gates': copy_gate_output
         }
 
         return model_output
@@ -567,15 +585,28 @@ class Model(nn.Module):
 
         prev_context = torch.zeros(1, enc_outputs.size(-1)).cuda(device=device)
 
-        coverage = enc_outputs.data.new_zeros(size=(1, enc_outputs.size(1)))
+        # coverage = enc_outputs.data.new_zeros(size=(1, enc_outputs.size(1)))
+        if self.decoder.coverage_scatter == 'none':
+            coverage = enc_outputs.data.new_zeros(size=(1, enc_outputs.size(1)))
+        else:
+            num_oov = max(torch.max(batch_data.paragraph_extended_ids - self.decoder.vocab_size + 1), 0)
+            coverage = enc_outputs.data.new_zeros(size=(1, self.decoder.vocab_size + num_oov))
 
         # h, c = enc_states  # [2, b, d] but b = 1
+        init_rnn_hidden = self.decoder.init_rnn_hidden(enc_states)
+        if self.decoder.dec_rnn_type == 'GRU':
+            init_rnn_hidden = init_rnn_hidden[:, 0, :]
+        else:
+            h, c = init_rnn_hidden
+            init_rnn_hidden = (h[:, 0, :], c[:, 0, :])
         hypotheses = [Hypothesis(tokens=[TRG_SOS_INDEX],
                                  log_probs=[0.0],
                                  # state=(h[:, 0, :], c[:, 0, :]),
-                                 state=self.decoder.init_rnn_hidden(enc_states)[:, 0, :],
+                                 # state=self.decoder.init_rnn_hidden(enc_states)[:, 0, :],
+                                 state=init_rnn_hidden,
                                  context=prev_context[0],
-                                 coverage=coverage[0]) for _ in range(beam_size)]
+                                 coverage=coverage[0],
+                                 uncertainty_scores=[0.0]) for _ in range(beam_size)]
         # tile enc_outputs, enc_mask for beam search
         ext_src_seq = batch_data.paragraph_extended_ids.repeat(beam_size, 1)
         enc_outputs = enc_outputs.repeat(beam_size, 1, 1)
@@ -586,67 +617,83 @@ class Model(nn.Module):
         results = []
         while num_steps < max_decode_step and len(results) < beam_size:
             latest_tokens = [h.latest_token for h in hypotheses]
-            latest_tokens = [idx if idx < len(
-                tok2idx) else TRG_UNK_INDEX for idx in latest_tokens]
+            # change any in-article temporary OOV ids to [UNK] id, so that we can lookup word embeddings
+            latest_tokens = [idx if idx < len(tok2idx) else TRG_UNK_INDEX for idx in latest_tokens]
             prev_y = torch.tensor(latest_tokens, dtype=torch.long, device=device).view(-1)
 
             # if config.use_gpu:
             #     prev_y = prev_y.to(self.device)
 
             # make batch of which size is beam size
-            # all_state_h = []
-            # all_state_c = []
+            all_state_h = []
+            all_state_c = []
             all_state = []
             all_context = []
             all_coverage = []
             for h in hypotheses:
-                # state_h, state_c = h.state  # [num_layers, d]
-                # all_state_h.append(state_h)
-                # all_state_c.append(state_c)
-                all_state.append(h.state)
+                if self.decoder.dec_rnn_type == 'GRU':
+                    all_state.append(h.state)
+                else:
+                    state_h, state_c = h.state  # [num_layers, d]
+                    all_state_h.append(state_h)
+                    all_state_c.append(state_c)
                 all_context.append(h.context)
                 all_coverage.append(h.coverage)
 
-            # prev_h = torch.stack(all_state_h, dim=1)  # [num_layers, beam, d]
-            # prev_c = torch.stack(all_state_c, dim=1)  # [num_layers, beam, d]
-            # prev_states = (prev_h, prev_c)
-            prev_states = torch.stack(all_state, dim=1)  # [num_layers, beam, d]
+            if isinstance(h.state, tuple):
+                prev_h = torch.stack(all_state_h, dim=1)  # [num_layers, beam, d]
+                prev_c = torch.stack(all_state_c, dim=1)  # [num_layers, beam, d]
+                prev_states = (prev_h, prev_c)
+            else:
+                prev_states = torch.stack(all_state, dim=1)  # [num_layers, beam, d]
             prev_context = torch.stack(all_context, dim=0)
             prev_coverage = torch.stack(all_coverage, dim=0)
             # [beam_size, |V|]
 
             embedded_prev_y = self.embeddings(prev_y)
-            logits, states, context_vector, coverage_vector, pre_compute = self.decoder.decode(embedded_prev_y, ext_src_seq,
+            probs, uts, states, context_vector, coverage_vector, pre_compute = self.decoder.decode(embedded_prev_y, ext_src_seq,
                                                                        prev_states, prev_context,
                                                                        # enc_features, enc_mask)
                                                                         memories, enc_mask, prev_coverage, pre_compute=None)
             # h_state, c_state = states
-            log_probs = F.log_softmax(logits, dim=1)
-            top_k_log_probs, top_k_ids \
-                = torch.topk(log_probs, beam_size * 2, dim=-1)
+            # log_probs = F.log_softmax(logits, dim=1)
+            log_probs = torch.log(probs)
+            scores = probs
+            # scores = log_probs
+            # scores = torch.stack([0.885 * ((sum(h.log_probs) + log_prob) / (len(h.log_probs) + 1)) - 0.115 * math.log((sum(h.uncertainty_scores) + ut) / ((len(h.log_probs) + 1)))
+            #           for h, log_prob, ut in zip(hypotheses, log_probs, uts)])
+
+            top_k_log_probs, top_k_ids = torch.topk(scores, beam_size * 2, dim=-1)
+
+            if (top_k_ids < 0).any():
+                print('negative topk ids detected.')
 
             all_hypotheses = []
             num_orig_hypotheses = 1 if num_steps == 0 else len(hypotheses)
             for i in range(num_orig_hypotheses):
                 h = hypotheses[i]
-                # state_i = (h_state[:, i, :], c_state[:, i, :])
-                state_i = states[:, i, :]
+                if self.decoder.dec_rnn_type == 'GRU':
+                    state_i = states[:, i, :]
+                else:
+                    state_i = (states[0][:, i, :], states[1][:, i, :])
                 context_i = context_vector[i]
                 coverage_i = coverage_vector[i]
                 for j in range(beam_size * 2):
 
                     token = top_k_ids[i][j].item()
-                    score = top_k_log_probs[i][j].item()
-
+                    # log_prob = log_probs[i][token].item()
+                    log_prob = probs[i][token].item()
+                    unc_score = uts[i].item()
 
                     # vocab_entropy = torch.sum(-1 * log_probs[i] * torch.log(log_probs[i]), 1) / torch.log(len(tok2idx))
                     # copy_entropy = torch.sum(-1 * context_i * torch.log(context_i), 1) / torch.log(paragraph_embeddings.size(1))
 
                     new_h = h.extend(token=token,
-                                     log_prob=score,
+                                     log_prob=log_prob,
                                      state=state_i,
                                      context=context_i,
-                                     coverage=coverage_i)
+                                     coverage=coverage_i,
+                                     uncertainty_scores=unc_score)
                     all_hypotheses.append(new_h)
 
             hypotheses = []

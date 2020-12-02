@@ -8,11 +8,12 @@ from torch.nn.utils.rnn import pad_packed_sequence, pack_padded_sequence
 from torch_scatter import scatter_max
 
 from search.searcher import Hypothesis, sort_hypotheses
-from models.modules.stacked_rnn import StackedGRU
+from models.modules.stacked_rnn import StackedGRU, StackedLSTM
 from models.modules.concat_attention import ConcatAttention
 from models.modules.maxout import MaxOut
 
 INF = 1e12
+
 
 class Embeddings(nn.Module):
     """Construct the embeddings from word, pos_tag, ner_tag, dep_tag, cas_tag and answer_tag embeddings.
@@ -110,10 +111,17 @@ class Encoder(nn.Module):
         # rnn_hidden_size = self.hidden_size // self.num_directions
         self.hidden_size = config.enc_rnn_size
         rnn_hidden_size = self.hidden_size // self.num_directions
-        self.rnn = nn.GRU(rnn_input_size, rnn_hidden_size,
-                          num_layers=config.enc_num_layers,
-                          dropout=config.dropout,
-                          bidirectional=config.brnn, batch_first=True)
+
+        assert config.enc_rnn_type in ['GRU', 'LSTM'], 'Encoder RNN type = %s is not supported.' % config.enc_rnn_type
+        self.rnn = getattr(nn, config.enc_rnn_type)(
+            rnn_input_size, rnn_hidden_size,
+            num_layers=config.enc_num_layers,
+            dropout=config.dropout,
+            bidirectional=config.brnn, batch_first=True)
+        # self.rnn = nn.GRU(rnn_input_size, rnn_hidden_size,
+        #                   num_layers=config.enc_num_layers,
+        #                   dropout=config.dropout,
+        #                   bidirectional=config.brnn, batch_first=True)
 
         self.wf =  nn.Linear(2 * self.hidden_size, self.hidden_size, bias=False)
         self.wg = nn.Linear(2 * self.hidden_size, self.hidden_size, bias=False)
@@ -178,13 +186,26 @@ class Encoder(nn.Module):
         # x = x.view(batch_size, J, 2 * self.hidden_size)
         x = x.view(batch_size, J, self.hidden_size)
 
+        if isinstance(paragraph_state, tuple):
+            h, c = paragraph_state
 
-        _, b, d = paragraph_state.size()
+            _, b, d = h.size()
+            h = h.view(-1, self.num_directions, b, d)  # [n_layers, bi, b, d]   (num_layers, num_directions, batch, hidden_size)
+            h = torch.cat((h[:, 0, :, :], h[:, -1, :, :]), dim=-1)       # n_layers, batch, hidden_size * num_directions
 
-        h = paragraph_state.view(-1, self.num_directions, b, d)  # [n_layers, bi, b, d]   (num_layers, num_directions, batch, hidden_size)
-        h = torch.cat((h[:, 0, :, :], h[:, -1, :, :]), dim=-1)       # n_layers, batch, hidden_size * num_directions
+            c = c.view(-1, self.num_directions, b, d)  # [n_layers, bi, b, d]   (num_layers, num_directions, batch, hidden_size)
+            c = torch.cat((c[:, 0, :, :], c[:, -1, :, :]), dim=-1)       # n_layers, batch, hidden_size * num_directions
 
-        return x, h
+            enc_state = (h, c)
+        else:
+            _, b, d = paragraph_state.size()
+
+            h = paragraph_state.view(-1, self.num_directions, b, d)  # [n_layers, bi, b, d]   (num_layers, num_directions, batch, hidden_size)
+            h = torch.cat((h[:, 0, :, :], h[:, -1, :, :]), dim=-1)  # n_layers, batch, hidden_size * num_directions
+
+            enc_state = h
+
+        return x, enc_state
 
 
 class Decoder(nn.Module):
@@ -199,11 +220,20 @@ class Decoder(nn.Module):
         if self.input_feed:
             input_size += config.enc_rnn_size
 
+        self.encoder_feed = config.encoder_feed
+        if self.encoder_feed:
+            input_size += config.enc_rnn_size
+
         self.enc_dec_transformer = nn.Linear(config.enc_rnn_size, config.dec_rnn_size)
 
-        self.rnn = StackedGRU(config.dec_num_layers, input_size, config.dec_rnn_size, config.dropout)
+        self.dec_rnn_type = config.dec_rnn_type
+        if config.dec_rnn_type == 'GRU':
+            self.rnn = StackedGRU(config.dec_num_layers, input_size, config.dec_rnn_size, config.dropout)
+        else:
+            self.rnn = StackedLSTM(config.dec_num_layers, input_size, config.dec_rnn_size, config.dropout)
 
-        self.attn = ConcatAttention(config.enc_rnn_size, config.dec_rnn_size, config.ctx_attn_size)
+        self.attn = ConcatAttention(config.enc_rnn_size, config.dec_rnn_size, config.ctx_attn_size,
+                                    use_coverage=config.use_coverage)
 
         self.dropout = nn.Dropout(config.dropout)
 
@@ -211,7 +241,7 @@ class Decoder(nn.Module):
         self.maxout = MaxOut(config.maxout_pool_size)
         self.maxout_pool_size = config.maxout_pool_size
 
-        self.copySwitch_l1 = nn.Linear(config.enc_rnn_size + config.dec_rnn_size, 1)
+        self.copySwitch_l1 = nn.Linear(config.embedding_size + config.enc_rnn_size + config.dec_rnn_size, 1)
         # self.copySwitch2 = nn.Linear(opt.ctx_rnn_size + opt.dec_rnn_size, 1)
         self.hidden_size = config.dec_rnn_size
         # self.cover = []
@@ -229,9 +259,20 @@ class Decoder(nn.Module):
         return b
 
     def init_rnn_hidden(self, enc_hidden_state):
-        # enc_hidden = torch.cat([enc_states[0], enc_states[-1]], dim=-1)
-        dec_hidden_state = self.enc_dec_transformer(enc_hidden_state)
-        return dec_hidden_state
+        if self.dec_rnn_type == 'GRU':
+            enc_hidden_state = enc_hidden_state[0] if isinstance(enc_hidden_state, tuple) else enc_hidden_state
+            dec_hidden_state = self.enc_dec_transformer(enc_hidden_state)
+            return dec_hidden_state
+        else:
+            if isinstance(enc_hidden_state, tuple):
+                h = self.enc_dec_transformer(enc_hidden_state[0])
+                c = self.enc_dec_transformer(enc_hidden_state[1])
+            else:
+                h = self.enc_dec_transformer(enc_hidden_state)
+                c = h
+            dec_hidden_state = (h, c)
+            return dec_hidden_state
+
 
     def forward(self, trg_seq_embedded, ext_src_seq, enc_states, encoder_outputs, encoder_mask):
 
@@ -265,7 +306,9 @@ class Decoder(nn.Module):
             embedded = trg_seq_embedded[:, i, :]  # [b, d]
             input_emb = embedded
             if self.input_feed:
-                input_emb = torch.cat([embedded, pre_context], 1)
+                input_emb = torch.cat([input_emb, pre_context], 1)
+            if self.encoder_feed:
+                input_emb = torch.cat([input_emb, enc_states[0,:,:]], 1)
 
             # Decoder
             output, hidden = self.rnn(input_emb, pre_hidden)
@@ -274,7 +317,7 @@ class Decoder(nn.Module):
             context, attn_dist, pre_compute, energy = self.attn(output, memories, coverage, pre_compute, encoder_mask)
 
             # Copy Mechanism
-            copyProb = self.copySwitch_l1(torch.cat((output, context), dim=1))
+            copyProb = self.copySwitch_l1(torch.cat((embedded, output, context), dim=1))
             # copyProb = self.copySwitch_l1(torch.cat((output, cur_context), dim=1))
             # copyProb = self.tanh(copyProb)
             # copyProb = self.copySwitch_l2(copyProb)
@@ -305,11 +348,13 @@ class Decoder(nn.Module):
 
 
 
-    def decode(self, embedded_y, ext_x, pre_hidden, prev_context, memories, encoder_mask, coverage, pre_compute=None):
+    def decode(self, embedded_y, ext_x, pre_hidden, prev_context, memories, encoder_mask, coverage, pre_compute=None, memory_states=None):
         # Embedding
         input_emb = embedded_y
         if self.input_feed:
             input_emb = torch.cat([embedded_y, prev_context], 1)
+        if self.encoder_feed:
+            input_emb = torch.cat([input_emb, memory_states], 1)
 
         # Decoder
         output, hidden = self.rnn(input_emb, pre_hidden)
@@ -317,7 +362,7 @@ class Decoder(nn.Module):
         # Encoder-Decoder Attention
         context, attn_dist, pre_compute, energy = self.attn(output, memories, coverage, pre_compute, encoder_mask)
 
-        copyProb = self.copySwitch_l1(torch.cat((output, context), dim=1))
+        copyProb = self.copySwitch_l1(torch.cat((embedded_y, output, context), dim=1))
         copyProb = torch.sigmoid(copyProb)
 
         # copyGateOutputs = copyGateOutputs.view(-1, 1)  # 320 * 1
@@ -458,11 +503,17 @@ class Model(nn.Module):
         coverage = enc_outputs.data.new_zeros(size=(1, enc_outputs.size(1)))
 
         # h, c = enc_states  # [2, b, d] but b = 1
+        init_rnn_hidden = self.decoder.init_rnn_hidden(enc_states)
+        if self.decoder.dec_rnn_type == 'GRU':
+            init_rnn_hidden = init_rnn_hidden[:, 0, :]
+        else:
+            h, c = init_rnn_hidden
+            init_rnn_hidden = (h[:, 0, :], c[:, 0, :])
         hypotheses = [Hypothesis(tokens=[TRG_SOS_INDEX],
                                  log_probs=[0.0],
                                  # state=(h[:, 0, :], c[:, 0, :]),
-                                 state=self.decoder.init_rnn_hidden(enc_states)[:, 0, :],
-                                 # state=self.decoder.init_rnn_hidden(enc_states),
+                                 # state=self.decoder.init_rnn_hidden(enc_states)[:, 0, :],
+                                 state=init_rnn_hidden,
                                  context=prev_context[0],
                                  coverage=coverage[0],
                                  uncertainty_scores=[0.0]) for _ in range(beam_size)]
@@ -471,6 +522,7 @@ class Model(nn.Module):
         enc_outputs = enc_outputs.repeat(beam_size, 1, 1)
         # enc_features = self.decoder.get_encoder_features(enc_outputs)
         memories = enc_outputs
+        memory_states = enc_states[0,:,:].repeat(beam_size, 1)
         enc_mask = attention_mask.repeat(beam_size, 1)
         num_steps = 0
         results = []
@@ -484,23 +536,27 @@ class Model(nn.Module):
             #     prev_y = prev_y.to(self.device)
 
             # make batch of which size is beam size
-            # all_state_h = []
-            # all_state_c = []
+            all_state_h = []
+            all_state_c = []
             all_state = []
             all_context = []
             all_coverage = []
             for h in hypotheses:
-                # state_h, state_c = h.state  # [num_layers, d]
-                # all_state_h.append(state_h)
-                # all_state_c.append(state_c)
-                all_state.append(h.state)
+                if self.decoder.dec_rnn_type == 'GRU':
+                    all_state.append(h.state)
+                else:
+                    state_h, state_c = h.state  # [num_layers, d]
+                    all_state_h.append(state_h)
+                    all_state_c.append(state_c)
                 all_context.append(h.context)
                 all_coverage.append(h.coverage)
 
-            # prev_h = torch.stack(all_state_h, dim=1)  # [num_layers, beam, d]
-            # prev_c = torch.stack(all_state_c, dim=1)  # [num_layers, beam, d]
-            # prev_states = (prev_h, prev_c)
-            prev_states = torch.stack(all_state, dim=1)  # [num_layers, beam, d]
+            if isinstance(h.state, tuple):
+                prev_h = torch.stack(all_state_h, dim=1)  # [num_layers, beam, d]
+                prev_c = torch.stack(all_state_c, dim=1)  # [num_layers, beam, d]
+                prev_states = (prev_h, prev_c)
+            else:
+                prev_states = torch.stack(all_state, dim=1)  # [num_layers, beam, d]
             prev_context = torch.stack(all_context, dim=0)
             prev_coverage = torch.stack(all_coverage, dim=0)
             # [beam_size, |V|]
@@ -509,7 +565,8 @@ class Model(nn.Module):
             probs, uts, states, context_vector, coverage_vector, pre_compute = self.decoder.decode(embedded_prev_y, ext_src_seq,
                                                                        prev_states, prev_context,
                                                                        # enc_features, enc_mask)
-                                                                        memories, enc_mask, prev_coverage, pre_compute=None)
+                                                                        memories, enc_mask, prev_coverage, pre_compute=None,
+                                                                                                   memory_states=memory_states)
             # h_state, c_state = states
             # log_probs = F.log_softmax(logits, dim=1)
             log_probs = torch.log(probs)
@@ -527,8 +584,10 @@ class Model(nn.Module):
             num_orig_hypotheses = 1 if num_steps == 0 else len(hypotheses)
             for i in range(num_orig_hypotheses):
                 h = hypotheses[i]
-                # state_i = (h_state[:, i, :], c_state[:, i, :])
-                state_i = states[:, i, :]
+                if self.decoder.dec_rnn_type == 'GRU':
+                    state_i = states[:, i, :]
+                else:
+                    state_i = (states[0][:, i, :], states[1][:, i, :])
                 context_i = context_vector[i]
                 coverage_i = coverage_vector[i]
                 for j in range(beam_size * 2):

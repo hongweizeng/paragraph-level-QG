@@ -64,12 +64,28 @@ class XentScorer(Scorer):
         return stats.xent()
 
 
-DEFAULT_SCORERS = [PPLScorer(), AccuracyScorer(), XentScorer]
+class BLEUScorer(Scorer):
+
+    def __init__(self):
+        super(BLEUScorer, self).__init__(float("-inf"), "bleu")
+
+    def is_improving(self, stats):
+        return stats.bleu > self.best_score
+
+    def is_decreasing(self, stats):
+        return stats.bleu < self.best_score
+
+    def _caller(self, stats):
+        return stats.bleu
+
+
+DEFAULT_SCORERS = [PPLScorer(), AccuracyScorer(), XentScorer(), BLEUScorer()]
 
 SCORER_BUILDER = {
     "ppl": PPLScorer,
     "acc": AccuracyScorer,
-    "xent": XentScorer
+    "xent": XentScorer,
+    "bleu": BLEUScorer
 }
 
 

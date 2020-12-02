@@ -57,9 +57,11 @@ class CheckpointManager(object):
         checkpoint = torch.load(self.latest_checkpoint_path)
         return checkpoint
 
-    def save(self, checkpoint, is_improving):
-        checkpoint_path = os.path.join(self.save_path,
-                                       'step_%d_acc_%.3f.ckpt' % (checkpoint.training_step, checkpoint.scores['acc']))
+    def save(self, checkpoint, is_improving, criteria='acc'):
+        if isinstance(criteria, list):
+            criteria = criteria[0]
+        checkpoint_path = os.path.join(self.save_path, 'step_%d_%s_%.3f.ckpt' %
+                                       (checkpoint.training_step, criteria, checkpoint.scores[criteria]))
         logger.info("Saving checkpoint to %s" % checkpoint_path)
         torch.save(checkpoint, checkpoint_path)
 
