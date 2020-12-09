@@ -39,15 +39,15 @@ def read_newsqa_meta(directory, corpus_type, save_path, recover=True):
             answer_text = " ".join(story_tokens[answer_token_ranges[0]:answer_token_ranges[-1]])
 
             # if answer_text in story_text:
-            # if answer_token_ranges[0] < 150:
-            #     paragraph_text = " ".join(story_tokens[:300])
-            # else:
-            #     paragraph_text = " ".join(story_tokens[answer_token_ranges[0]-150: answer_token_ranges[0]+150])
-
-            if answer_token_ranges[0] < 100:
-                paragraph_text = " ".join(story_tokens[:200])
+            if answer_token_ranges[0] < 150:
+                paragraph_text = " ".join(story_tokens[:300])
             else:
-                paragraph_text = " ".join(story_tokens[answer_token_ranges[0]-100: answer_token_ranges[0]+100])
+                paragraph_text = " ".join(story_tokens[answer_token_ranges[0]-150: answer_token_ranges[0]+150])
+
+            # if answer_token_ranges[0] < 100:
+            #     paragraph_text = " ".join(story_tokens[:200])
+            # else:
+            #     paragraph_text = " ".join(story_tokens[answer_token_ranges[0]-100: answer_token_ranges[0]+100])
 
             paragraph_text = paragraph_text.replace("''", '" ').replace("``", '" ')
 

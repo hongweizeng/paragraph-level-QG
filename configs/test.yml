@@ -148,6 +148,6 @@ inference:
     min_decode_step: 6
     max_decode_step: 50
 
-    beta: 0.0
+    beta: 0.1
 
     output: generated_question.txt

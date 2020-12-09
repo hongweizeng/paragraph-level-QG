@@ -3,6 +3,11 @@ paragraph level question generation
 
 ## Dataset
 Get the data under the ```data``` directory.
+```shell script
+git clone https://github.com/hongweizeng/paragraph-level-QG
+cd paragraph-level-QG
+mkdir data
+```
 
 ### 1. [Article-level Split] [Du et al., 2017] (SQuAD Split-1)
 **[Learning to Ask: Neural Question Generation for Reading Comprehension](https://www.aclweb.org/anthology/P17-1123.pdf)**. *ACL 2017*. [[Github]](https://github.com/xinyadu/nqg/tree/master/data)

@@ -4,15 +4,15 @@ setup: 'eanqg_newsqa'
 # ---------------------------------------- DATA CONFIGURATIONS ---------------------------------------- #
 #########################################################################################################
 
-#cached_train_path: 'data/newsqa/train.pt'
-#cached_dev_path: 'data/newsqa/dev.pt'
-#cached_test_path: 'data/newsqa/test.pt'
-#cached_vocabularies_path: 'data/newsqa/vocab.pt'
-#
-cached_train_path: 'data/newsqa_v2/train.pt'
-cached_dev_path: 'data/newsqa_v2/dev.pt'
-cached_test_path: 'data/newsqa_v2/test.pt'
-cached_vocabularies_path: 'data/newsqa_v2/vocab.pt'
+cached_train_path: 'data/newsqa/train.pt'
+cached_dev_path: 'data/newsqa/dev.pt'
+cached_test_path: 'data/newsqa/test.pt'
+cached_vocabularies_path: 'data/newsqa/vocab.pt'
+
+#cached_train_path: 'data/newsqa_v2/train.pt'
+#cached_dev_path: 'data/newsqa_v2/dev.pt'
+#cached_test_path: 'data/newsqa_v2/test.pt'
+#cached_vocabularies_path: 'data/newsqa_v2/vocab.pt'
 
 vocab_size: 45000
 
@@ -34,7 +34,7 @@ model:
     answer_tag_embedding_size: 16
 
 #   Encoder
-    enc_rnn_type: 'GRU'         # choices: ['GRU', 'LSTM']
+    enc_rnn_type: 'LSTM'         # choices: ['GRU', 'LSTM']
     brnn: True
     enc_num_layers: 2
     enc_rnn_size: 512
@@ -43,7 +43,7 @@ model:
     ctx_attn_size: 512
 
 #   Decoder
-    dec_rnn_type: 'GRU'         # choices: ['GRU', 'LSTM']
+    dec_rnn_type: 'LSTM'         # choices: ['GRU', 'LSTM']
 
     input_feed: True
     encoder_feed: False
@@ -102,7 +102,7 @@ train:
         # empty will be converted to NoneType while 'Null' will be converted to a tuple
         decay_method: Null
 
-        start_decay_steps: 6000
+        start_decay_steps: 10000
         decay_steps: 500
 #        start_decay_steps: 5
 #        decay_steps: 5
@@ -122,10 +122,10 @@ train:
         copy: True
         copy_weight: 1.0
 
-        coverage: True
+        coverage: False
         coverage_weight: 0.0
 
-        coverage_scatter: 'max'  # [none|max|sum]
+        coverage_scatter: 'sum'  # [none|max|sum]
 
     #   Checkpoint Manager
     checkpoint:
@@ -134,7 +134,7 @@ train:
     scorer:
         #   Early stop scorer:
         criteria: ['acc']
-        tolerance: 10
+        tolerance: 8
 
         # Learning rate scorer
 #        early_stop_tolerance: 8
@@ -152,6 +152,6 @@ inference:
     max_decode_step: 50
 
 #    beta: 0.115
-    beta: 0.0
+    beta: 0.17
 
     output: generated_question.txt

@@ -164,39 +164,28 @@ def main(args, device=None):
             logger.info('config = %s' % config)
 
         else:
-            checkpoint_path = os.path.join(config.save_path, DEFAULT_BEST_CHECKPOINT_NAME)
-
-
+            checkpoint_path = os.path.join(config.save_path, DEFAULT_LATEST_CHECKPOINT_NAME)
 
         # 1. Setup data
-        # logger.info("Loading vocabularies from %s" % config['cached_vocabularies_path'])
-        # vocabularies = torch.load(config['cached_vocabularies_path'])
-        # PAD_INDEX = vocabularies['token'].stoi[PAD_TOKEN]
-        # TRG_UNK_INDEX = vocabularies['token'].stoi[UNK_TOKEN]
-        #
-        # # Some related configuration about embeddings.
-        # config.model['vocab_size'] = len(vocabularies['token'])
-        # config.model['feature_tag_vocab_size'] = len(vocabularies['feature'])
-        # config.model['answer_tag_vocab_size'] = len(vocabularies['answer'])
-        # config.model.pad_token_id = PAD_INDEX
-        # config.model.unk_token_id = TRG_UNK_INDEX
         vocabularies, config = reset_configs(config)
-
-
         logger.info("Loading test dataset from %s" % config['cached_test_path'])
         test_dataset = torch.load(config.cached_test_path)
 
-        # test_dataset.examples = [ex for ex in test_dataset.examples if len(ex.answer_ids) < 10] #TODO, magic operation
-
         # 2. Setup model
         logger.info('Building model ...')
-        # model = setup_model(vocabularies, PAD_INDEX, TRG_UNK_INDEX, config, device, checkpoint_path)
         model = Model(config['model'])
-        logger.info('Loading best checkpoint from directory %s' % config['save_path'])
         checkpoint_manager: CheckpointManager = CheckpointManager(config['train']['checkpoint'],
                                                                   save_path=config['save_path'])
-        # checkpoint: Checkpoint = checkpoint_manager.load_best_checkpoint()
-        checkpoint: Checkpoint = checkpoint_manager.load_latest_checkpoint()
+
+        if checkpoint_path == 'best':
+            logger.info('Loading best checkpoint from directory %s' % checkpoint_manager.best_checkpoint_path)
+            checkpoint: Checkpoint = checkpoint_manager.load_best_checkpoint()
+        elif checkpoint_path == 'latest':
+            logger.info('Loading best checkpoint from directory %s' % checkpoint_manager.best_checkpoint_path)
+            checkpoint: Checkpoint = checkpoint_manager.load_latest_checkpoint()
+        else:
+            checkpoint: Checkpoint = torch.load(checkpoint_path)
+
         model.load_state_dict(checkpoint.model_state_dict)
         model.to(device)
         model.eval()

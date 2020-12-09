@@ -58,7 +58,8 @@ class Hypothesis(object):
                        state=state,
                        context=context,
                        coverage=coverage,
-                       uncertainty_scores=self.uncertainty_scores + [uncertainty_scores])
+                       uncertainty_scores=self.uncertainty_scores + [uncertainty_scores],
+                       beta=self.beta)
         return h
 
     @property
@@ -83,6 +84,7 @@ class Hypothesis(object):
             return sum(self.log_probs) / len(self.tokens)
         else:
             return (1 - self.beta) * sum(self.log_probs) / self.length - self.beta * math.log(sum(self.uncertainty_scores) / self.length)
+            # return (1 - self.beta) * sum(self.log_probs) / self.length - self.beta * (sum(self.uncertainty_scores) / self.length)
 
 
 
@@ -143,7 +145,8 @@ class Searcher(object):
                 batch_data=batch_data, beam_size=self.beam_size,
                 tok2idx=self.tok2idx,
                 TRG_SOS_INDEX=self.TRG_SOS_INDEX, TRG_UNK_INDEX=self.TRG_UNK_INDEX, TRG_EOS_INDEX=self.TRG_EOS_INDEX,
-                min_decode_step=self.min_decode_step, max_decode_step=self.max_decode_step, device=self.device)
+                min_decode_step=self.min_decode_step, max_decode_step=self.max_decode_step, device=self.device,
+                beta=self.beta)
 
             # discard START  token
             output_indices = [int(idx) for idx in best_question.tokens[1:-1]]
@@ -191,7 +194,8 @@ class Searcher(object):
                 batch_data=batch_data, beam_size=1,
                 tok2idx=self.tok2idx,
                 TRG_SOS_INDEX=self.TRG_SOS_INDEX, TRG_UNK_INDEX=self.TRG_UNK_INDEX, TRG_EOS_INDEX=self.TRG_EOS_INDEX,
-                min_decode_step=self.min_decode_step, max_decode_step=self.max_decode_step, device=self.device)
+                min_decode_step=self.min_decode_step, max_decode_step=self.max_decode_step, device=self.device,
+                beta=self.beta)
 
             # discard START  token
             output_indices = [int(idx) for idx in best_question.tokens[1:-1]]

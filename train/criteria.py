@@ -26,14 +26,14 @@ class Criterion(object):
         self.use_pointer = config.copy
         if self.use_pointer:
             self.copy_criterion = nn.NLLLoss(reduction=config.reduction).cuda(device)
-            self.copy_weight = config.copy_weight
+        self.copy_weight = config.copy_weight
 
         self.use_coverage = config.coverage
         if self.use_coverage:
             self.coverage_criterion = nn.NLLLoss(ignore_index=pad_token_id, reduction=config.reduction).cuda(device)
-            self.coverage_weight = config.coverage_weight
+        self.coverage_weight = config.coverage_weight
 
-            self.coverage_scatter = config.coverage_scatter
+        self.coverage_scatter = config.coverage_scatter
 
 
     def __call__(self, batch_data, model_output):

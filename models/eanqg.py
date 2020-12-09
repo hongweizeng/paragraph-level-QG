@@ -241,7 +241,8 @@ class Decoder(nn.Module):
         self.maxout = MaxOut(config.maxout_pool_size)
         self.maxout_pool_size = config.maxout_pool_size
 
-        self.copySwitch_l1 = nn.Linear(config.embedding_size + config.enc_rnn_size + config.dec_rnn_size, 1)
+        self.copySwitch_l1 = nn.Linear(config.enc_rnn_size + config.dec_rnn_size, 1)
+        # self.copySwitch_l1 = nn.Linear(config.embedding_size + config.enc_rnn_size + config.dec_rnn_size, 1)
         # self.copySwitch2 = nn.Linear(opt.ctx_rnn_size + opt.dec_rnn_size, 1)
         self.hidden_size = config.dec_rnn_size
         # self.cover = []
@@ -317,8 +318,8 @@ class Decoder(nn.Module):
             context, attn_dist, pre_compute, energy = self.attn(output, memories, coverage, pre_compute, encoder_mask)
 
             # Copy Mechanism
-            copyProb = self.copySwitch_l1(torch.cat((embedded, output, context), dim=1))
-            # copyProb = self.copySwitch_l1(torch.cat((output, cur_context), dim=1))
+            # copyProb = self.copySwitch_l1(torch.cat((embedded, output, context), dim=1))
+            copyProb = self.copySwitch_l1(torch.cat((output, context), dim=1))
             # copyProb = self.tanh(copyProb)
             # copyProb = self.copySwitch_l2(copyProb)
             copyProb = torch.sigmoid(copyProb)
@@ -362,7 +363,8 @@ class Decoder(nn.Module):
         # Encoder-Decoder Attention
         context, attn_dist, pre_compute, energy = self.attn(output, memories, coverage, pre_compute, encoder_mask)
 
-        copyProb = self.copySwitch_l1(torch.cat((embedded_y, output, context), dim=1))
+        # copyProb = self.copySwitch_l1(torch.cat((embedded_y, output, context), dim=1))
+        copyProb = self.copySwitch_l1(torch.cat((output, context), dim=1))
         copyProb = torch.sigmoid(copyProb)
 
         # copyGateOutputs = copyGateOutputs.view(-1, 1)  # 320 * 1
@@ -398,9 +400,9 @@ class Decoder(nn.Module):
             zeros = logit.data.new_zeros(size=(batch_size, num_oov))
 
             g_prob = torch.softmax(logit, dim=-1)
-            g_not_copy_prob = g_prob * (1. - copyProb)# + 1e-8
+            g_not_copy_prob = g_prob * (1. - copyProb) + 1e-8
             c_prob = torch.softmax(energy, dim=-1)
-            c_copy_prob = c_prob * copyProb# + 1e-8
+            c_copy_prob = c_prob * copyProb + 1e-8
 
             extended_prob = torch.cat([g_not_copy_prob, zeros], dim=1)
             out = torch.zeros_like(extended_prob)  # - INF
@@ -414,12 +416,13 @@ class Decoder(nn.Module):
             def HLoss(res):
                 # S = nn.Softmax(dim=1)
                 # LS = nn.LogSoftmax(dim=1)
-                b = -1 * res * torch.log(res)
+                b = -1 * res * torch.log(res + 1e-8)
                 b = torch.sum(b, 1)
                 return b
 
             Hg = HLoss(g_prob).unsqueeze(-1) * (1 - copyProb) / math.log(self.vocab_size)
-            Hc = HLoss(c_prob).unsqueeze(-1) * copyProb / math.log(max(num_oov, 1))
+            source_length = c_prob.size(1)
+            Hc = HLoss(c_prob).unsqueeze(-1) * copyProb / math.log(source_length)
             ut = Hg + Hc
 
 
@@ -490,7 +493,7 @@ class Model(nn.Module):
 
     def beam_search(self, batch_data, beam_size,
                     tok2idx, TRG_SOS_INDEX, TRG_UNK_INDEX, TRG_EOS_INDEX,
-                    min_decode_step, max_decode_step, device):
+                    min_decode_step, max_decode_step, device, beta=0.):
 
         paragraph_embeddings, paragraph_mask, evidences_embeddings, evidences_mask = self.run_enc_embeddings(batch_data)
         attention_mask = paragraph_mask
@@ -516,13 +519,18 @@ class Model(nn.Module):
                                  state=init_rnn_hidden,
                                  context=prev_context[0],
                                  coverage=coverage[0],
-                                 uncertainty_scores=[0.0]) for _ in range(beam_size)]
+                                 uncertainty_scores=[0.0],
+                                 beta=beta) for _ in range(beam_size)]
         # tile enc_outputs, enc_mask for beam search
         ext_src_seq = batch_data.paragraph_extended_ids.repeat(beam_size, 1)
         enc_outputs = enc_outputs.repeat(beam_size, 1, 1)
         # enc_features = self.decoder.get_encoder_features(enc_outputs)
         memories = enc_outputs
-        memory_states = enc_states[0,:,:].repeat(beam_size, 1)
+        if isinstance(enc_states, tuple):
+            memory_states = (enc_states[0][0,:,:].repeat(beam_size, 1),  enc_states[1][0,:,:].repeat(beam_size, 1))
+        else:
+            memory_states = enc_states[0, :, :].repeat(beam_size, 1)
+
         enc_mask = attention_mask.repeat(beam_size, 1)
         num_steps = 0
         results = []
@@ -570,10 +578,15 @@ class Model(nn.Module):
             # h_state, c_state = states
             # log_probs = F.log_softmax(logits, dim=1)
             log_probs = torch.log(probs)
-            scores = probs
-            # scores = log_probs
-            # scores = torch.stack([0.885 * ((sum(h.log_probs) + log_prob) / (len(h.log_probs) + 1)) - 0.115 * math.log((sum(h.uncertainty_scores) + ut) / ((len(h.log_probs) + 1)))
-            #           for h, log_prob, ut in zip(hypotheses, log_probs, uts)])
+            # scores = probs
+            if beta == 0.0:
+                scores = log_probs
+            else:
+                scores = torch.stack(
+                    [(1. - beta) * ((sum(h.log_probs) + log_prob) / (len(h.log_probs) + 1)) -
+                     beta * math.log((sum(h.uncertainty_scores) + ut) / (len(h.log_probs) + 1))
+                     # beta * ((sum(h.uncertainty_scores) + ut) / (len(h.log_probs) + 1))
+                     for h, log_prob, ut in zip(hypotheses, log_probs, uts)])
 
             top_k_log_probs, top_k_ids = torch.topk(scores, beam_size * 2, dim=-1)
 
@@ -593,8 +606,8 @@ class Model(nn.Module):
                 for j in range(beam_size * 2):
 
                     token = top_k_ids[i][j].item()
-                    # log_prob = log_probs[i][token].item()
-                    log_prob = probs[i][token].item()
+                    log_prob = log_probs[i][token].item()
+                    # log_prob = probs[i][token].item()
                     unc_score = uts[i].item()
 
                     # vocab_entropy = torch.sum(-1 * log_probs[i] * torch.log(log_probs[i]), 1) / torch.log(len(tok2idx))
