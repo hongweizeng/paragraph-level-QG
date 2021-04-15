@@ -85,9 +85,14 @@ python preprocess.py -data_dir data -dataset newsqa
 
 
 ## 2. Train & Test
-Specify the configurations in `.yml` file.
+Train & test the model with specified configuration, e.g. `test.yml` file.
 ```shell script
 python main.py -train -test -config configs/test.yml 
+```
+
+Or you can test with specified configuration & checkpoint.
+```shell script
+python main.py -test -config *.yml -test_from_model *.ckpt 
 ```
 
 
