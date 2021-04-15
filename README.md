@@ -86,7 +86,9 @@ python preprocess.py -data_dir data -dataset newsqa
 
 ## References
 
-[1]. https://github.com/seanie12/neural-question-generation
+[1]. https://github.com/magic282/NQG
+
+[2]. https://github.com/seanie12/neural-question-generation
 
 ## Citation
 If you find this code is helpful, please cite our paper:
