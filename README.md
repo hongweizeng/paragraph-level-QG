@@ -58,10 +58,10 @@ python preprocess.py -data_dir data -dataset squad_split_v2
 ### 3. NewsQA:
 **[NewsQA: A Machine Comprehension Dataset](https://arxiv.org/pdf/1611.09830.pdf)**. *Rep4NLP@ACL 2017*.
 
-[Liu et al., WWW 2019](https://arxiv.org/pdf/1902.10418.pdf) (77,538 | 4,341 | 4,383) 
+[Liu et al., WWW 2019](https://arxiv.org/pdf/1902.10418.pdf) (77,538 | 4,341 | 4,383): 
 In our experiment, we picked a subset of NewsQA where answers are top-ranked and are composed of a contiguous sequence of words within the input sentence of the document.
 
-[Tuan et al., AAAI 2020](https://arxiv.org/pdf/1910.10274.pdf) (76,560 | 4,341 | 4,292) 
+[Tuan et al., AAAI 2020](https://arxiv.org/pdf/1910.10274.pdf) (76,560 | 4,341 | 4,292): 
 In our experiment, we select the questions in NewsQA where answers are sub-spans within the articles. 
 As a result, we obtain a dataset with 76k questions for train set, and 4k questions for each dev and test set.
 
