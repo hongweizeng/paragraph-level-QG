@@ -88,16 +88,14 @@ python preprocess.py -data_dir data -dataset newsqa
 
 [1]. https://github.com/seanie12/neural-question-generation
 
-[2]. https://github.com/WING-NUS/SG-Deep-Question-Generation
-
 ## Citation
 If you find this code is helpful, please cite our paper:
 ```
-@article{zeng-etal-2020-EANQG,
+@article{zeng-etal-2021-EANQG,
     title = {Improving Paragraph-level Question Generation with Extended Answer Network and Uncertainty-aware Beam Search},
     author = {Hongwei Zeng, Zhuo Zhi, Jun Liu and Bifan Wei},
     url = {https://github.com/hongweizeng/paragraph-level-QG},
-    booktitle = {Under Review},
-    year = {2020}
+    booktitle = {Information Sciences},
+    year = {2021}
 }
 ```
