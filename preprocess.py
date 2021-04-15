@@ -15,7 +15,7 @@ from datasets.common import setup_vocab, QgDataset, Example, UNK_TOKEN, PAD_TOKE
 
 from datasets.squad import read_squad_qas_dict, read_squad_examples
 from datasets.newsqa import read_newsqa_examples, read_newsqa_meta
-
+from datasets.hotpotqa import read_hotpotqa_examples
 
 def build_vocabularies(examples, vocab_size, min_word_frequency, directory):
     logger.info("Setup vocabularies...")
@@ -122,6 +122,8 @@ def setup_dataset(directory, corpus_type, vocabularies, qas_id_dict, vocab_size=
     elif 'test' in directory:
         from datasets.test import read_squad_examples_without_ids
         examples = read_squad_examples_without_ids(corpus_type=corpus_type, qas_id_dict=qas_id_dict)
+    elif 'hotpotqa' in directory:
+        examples = read_hotpotqa_examples(corpus_type=corpus_type)
 
 
     if corpus_type == 'train':
@@ -141,8 +143,8 @@ def setup_dataset(directory, corpus_type, vocabularies, qas_id_dict, vocab_size=
 if __name__ == '__main__':
 
     parser = argparse.ArgumentParser(description='Paragraph-level QG')
-    parser.add_argument('--dataset', '-dataset', type=str, default='du_acl2017',
-                        choices=['du_acl2017', 'zhou_nlpcc2017', 'newsqa_v2', 'squad_test'])
+    parser.add_argument('--dataset', '-dataset', type=str, default='hotpotqa',
+                        choices=['du_acl2017', 'zhou_nlpcc2017', 'newsqa_v2', 'squad_test', 'hotpotqa'])
     parser.add_argument('--data_dir', '-data_dir', type=str, default='data')
                         # choices=['data/squad_split_v1', 'data/squad_split_v2', 'data/newsqa'])
 
@@ -183,11 +185,15 @@ if __name__ == '__main__':
         test_meta = read_newsqa_meta(directory='data/newsqa', corpus_type='test', save_path='newsqa.test.meta', recover=True)
 
         squad_qas_id_dict = None
+    elif 'hotpotqa' in data_directory:
+        train_meta = None
+        dev_meta = None
+        test_meta = None
     else:
         raise NotImplementedError('Dataset from %s is not implemented.' % data_directory)
 
     _, vocabularies = setup_dataset(directory=data_directory, corpus_type='train', qas_id_dict=train_meta,
-                  vocabularies=None, vocab_size=20000, min_word_frequency=3, recover=False)
+                  vocabularies=None, vocab_size=50000, min_word_frequency=3, recover=False)
 
     setup_dataset(directory=data_directory, corpus_type='dev', qas_id_dict=dev_meta,
                   vocabularies=vocabularies, recover=False)

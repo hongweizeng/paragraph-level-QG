@@ -199,9 +199,10 @@ def main(args, device=None):
 if __name__ == '__main__':
     # config
     parser = argparse.ArgumentParser(description='SSR')
-    parser.add_argument('--config', '-config', type=str, default='configs/test.yml',
-                        choices=['configs/du_acl2017.yml', 'configs/zhou_nlpcc2017.yml', 'configs/zhao_emnlp2018.yml',
-                                 'configs/eanqg_newsqa.yml', 'configs/test.yml', 'configs/master.yml'])
+    parser.add_argument('--config', '-config', type=str, default='configs/test.yml')
+                        # ,
+                        # choices=['configs/du_acl2017.yml', 'configs/zhou_nlpcc2017.yml', 'configs/zhao_emnlp2018.yml',
+                        #          'configs/eanqg_newsqa.yml', 'configs/test.yml', 'configs/master.yml', 'configs/eanqg_hotpotqa.yml'])
 
     parser.add_argument('--gpu', '-gpu', type=int, default=0)
     parser.add_argument('--seed', '-seed', type=int, default=73157)
