@@ -1,7 +1,7 @@
 # paragraph-level-QG
 paragraph level question generation
 
-## Dataset
+## 1. Preprocess Dataset
 Get the data under the ```data``` directory.
 ```shell script
 git clone https://github.com/hongweizeng/paragraph-level-QG
@@ -9,7 +9,7 @@ cd paragraph-level-QG
 mkdir data
 ```
 
-### 1. [Article-level Split] [Du et al., 2017] (SQuAD Split-1)
+### 1.1 [Article-level Split] [Du et al., 2017] (SQuAD Split-1)
 **[Learning to Ask: Neural Question Generation for Reading Comprehension](https://www.aclweb.org/anthology/P17-1123.pdf)**. *ACL 2017*. [[Github]](https://github.com/xinyadu/nqg/tree/master/data)
 
 [Du et al., ACL 2017](https://arxiv.org/pdf/1705.00106.pdf) (70484 | 10570 | 11877): We use the original dev* set in the SQuAD dataset as our dev set, we split the original training* set into our training set and test set.
@@ -30,7 +30,7 @@ python preprocess.py -data_dir data -dataset squad_split_v1
 ```
 
 
-### 2. [Sentence-level Split] [Zhou et al., 2017] [Zhao et al., 2018] (SQuAD Split-2)
+### 1.2 [Sentence-level Split] [Zhou et al., 2017] [Zhao et al., 2018] (SQuAD Split-2)
 **[Neural Question Generation from Text: A Preliminary Study](https://arxiv.org/pdf/1704.01792.pdf)**. *NLPCC 2017*. [[Github]](https://github.com/magic282/NQG) [[Data]](https://res.qyzhou.me/)
 
 [Zhou et al., NLPCC 2017](https://arxiv.org/pdf/1704.01792.pdf) (86,635 | 8,965 | 8,964): Randomly halve the development set to construct the new development and test sets.
@@ -55,7 +55,7 @@ python preprocess.py -data_dir data -dataset squad_split_v2
 ```
 
 
-### 3. NewsQA:
+### 1.3 NewsQA:
 **[NewsQA: A Machine Comprehension Dataset](https://arxiv.org/pdf/1611.09830.pdf)**. *Rep4NLP@ACL 2017*.
 
 [Liu et al., WWW 2019](https://arxiv.org/pdf/1902.10418.pdf) (77,538 | 4,341 | 4,383): 
@@ -81,6 +81,13 @@ Then, we will have `train.tsv`, `dev.tsv` and `test.tsv` in `datasets/newsqa/spl
 ```shell script
 cd ..
 python preprocess.py -data_dir data -dataset newsqa 
+```
+
+
+## 2. Train & Test
+Specify the configurations in `.yml` file.
+```shell script
+python main.py -train -test -config configs/test.yml 
 ```
 
 
